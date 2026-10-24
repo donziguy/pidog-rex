@@ -9,6 +9,7 @@ _SECRET_NAMES = (
     "XAI_API_KEY", "XAI_KEY", "REX_DASH_TOKEN",
     "REX_NTFY_TOKEN", "REX_ALERT_WEBHOOK_URL",
     "REX_MQTT_PASSWORD",
+    "GROK_OAUTH_TOKEN", "GROK_OAUTH_REFRESH_TOKEN",
 )
 _log_lock = threading.Lock()
 
@@ -22,7 +23,7 @@ def load_env_file(path: Path = ENV_PATH) -> None:
             continue
         k, v = line.split("=", 1)
         k = k.strip(); v = v.strip().strip('"').strip("'")
-        if k and (k.startswith(("PIDOG_", "XAI_")) or k not in os.environ):
+        if k and (k.startswith(("PIDOG_", "XAI_", "GROK_")) or k not in os.environ):
             os.environ[k] = v
 
 

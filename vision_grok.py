@@ -5,6 +5,7 @@ import config as C
 from config import log
 import abort
 import brain
+import grok_oauth
 
 _last_thumb = None
 _pending_thumb = None  # latest measurement; committed only when a vision call is spent
@@ -74,6 +75,66 @@ def due(changed: bool, force: bool = False) -> bool:
     return changed and (time.time() - _last_call) >= max(C.GROK_MIN_INTERVAL, backoff)
 
 
+def _api_payload(img: bytes) -> dict:
+    return {"model": C.GROK_MODEL, "max_tokens": 220, "temperature": 0.7, "messages": [
+        {"role": "system", "content": brain.PERSONALITY + "\n" + brain.context()},
+        {"role": "user", "content": [
+            {"type": "text", "text": "Analyze this security camera frame. Return only the JSON object requested."},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(img).decode()}}]}]}
+
+
+def _sub_payload(img: bytes) -> dict:
+    """NoirOS grok-sub body, plus the camera frame as an input image.
+
+    grok-sub is pinned to grok-4.7 on the Responses API. That core has no
+    separate vision model, so the same id carries the JPEG.
+    """
+    return {
+        "model": grok_oauth.SUB_MODEL,
+        "instructions": brain.PERSONALITY + "\n" + brain.context(),
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Analyze this security camera frame. Return only the JSON object requested."},
+                {"type": "input_image", "image_url": "data:image/jpeg;base64," + base64.b64encode(img).decode()},
+            ],
+        }],
+        "stream": True,
+        "store": False,
+    }
+
+
+def _request_for(auth_path: str, img: bytes) -> tuple[str, dict]:
+    if auth_path == "sub":
+        return grok_oauth.RESPONSES_URL, _sub_payload(img)
+    return C.GROK_URL, _api_payload(img)
+
+
+def _response_text(auth_path: str, response) -> str:
+    if auth_path != "sub":
+        return response.json()["choices"][0]["message"]["content"]
+    raw = getattr(response, "text", None)
+    if not isinstance(raw, str) or not raw:
+        raw = json.dumps(response.json())
+    parsed = grok_oauth.parse_responses_body(raw)
+    text = grok_oauth.extract_output_text(parsed)
+    if not text:
+        raise ValueError("empty responses output")
+    return text
+
+
+def _accept(parsed: dict, changed: bool) -> dict:
+    for key in ("has_person", "has_dog", "has_animal", "has_suspicious_object"):
+        parsed[key] = bool(parsed.get(key))
+    parsed.setdefault("threat_level", "none")
+    parsed["roast"] = brain.sanitize(str(parsed.get("roast", "")), "This shift is so boring even the dust looks unemployed.")
+    parsed["scene_summary"] = str(parsed.get("scene_summary", ""))[:200]
+    parsed["_changed"] = changed
+    parsed["_source"] = "grok"
+    return parsed
+
+
 def analyze(path, force: bool = False) -> dict:
     """Returns an analysis dict. API errors are logged (status only) and fall back to Ollama."""
     global _last_call, _fail_streak
@@ -84,36 +145,51 @@ def analyze(path, force: bool = False) -> dict:
     # change would swallow it, and Grok would never see a person who walked in
     # during the cooldown.
     _commit_scene()
-    key = C.xai_key()
+    chosen = grok_oauth.credentials()
     _last_call = time.time()
-    if not key:
-        log("grok_skip no XAI_API_KEY")
+    if not chosen:
+        log("grok_skip no credentials")
         return _fallback("no_key", changed)
+    auth_path, token = chosen
+    log(f"grok_auth={auth_path}")
     try:
         img = _jpeg_320(path)
     except Exception as exc:
         log(f"grok_image_error={exc}")
         return _fallback("image", changed)
-    payload = {"model": C.GROK_MODEL, "max_tokens": 220, "temperature": 0.7, "messages": [
-        {"role": "system", "content": brain.PERSONALITY + "\n" + brain.context()},
-        {"role": "user", "content": [
-            {"type": "text", "text": "Analyze this security camera frame. Return only the JSON object requested."},
-            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(img).decode()}}]}]}
-    for attempt in range(1, C.GROK_RETRIES + 1):
+    url, payload = _request_for(auth_path, img)
+    refreshed = False
+    attempt = 1
+    while attempt <= C.GROK_RETRIES:
         try:
-            r = abort.post(C.GROK_URL, C.GROK_TIMEOUT, json=payload,
-                           headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+            r = abort.post(url, C.GROK_TIMEOUT, json=payload,
+                           headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
             log(f"grok_status={r.status_code} attempt={attempt} image_bytes={len(img)} diff={diff:.1f}")
+            if r.status_code in (401, 403) and auth_path == "sub" and not refreshed:
+                refreshed = True
+                try:
+                    fresh = grok_oauth.refresh_saved_token()
+                except abort.Aborted:
+                    log("grok_abandoned")
+                    return empty("shutdown")
+                if fresh:
+                    token = fresh
+                    log("grok_auth=sub")
+                    continue
+                log("grok_auth_expired")
+                api = (C.xai_key() or "").strip()
+                if api:
+                    auth_path = "api"
+                    token = api
+                    url, payload = _request_for("api", img)
+                    log("grok_auth=api")
+                    continue
+                _fail_streak += 1
+                return _fallback("grok_auth_expired", changed)
             if r.status_code in (400, 401, 403, 404):
                 break  # not retryable
             if r.ok:
-                a = _parse(r.json()["choices"][0]["message"]["content"])
-                for k in ("has_person", "has_dog", "has_animal", "has_suspicious_object"):
-                    a[k] = bool(a.get(k))
-                a.setdefault("threat_level", "none")
-                a["roast"] = brain.sanitize(str(a.get("roast", "")), "This shift is so boring even the dust looks unemployed.")
-                a["scene_summary"] = str(a.get("scene_summary", ""))[:200]
-                a["_changed"] = changed; a["_source"] = "grok"
+                a = _accept(_parse(_response_text(auth_path, r)), changed)
                 _fail_streak = 0
                 log(f"grok_ok threat={a['threat_level']} person={a['has_person']} dog={a['has_dog']}")
                 return a
@@ -126,6 +202,7 @@ def analyze(path, force: bool = False) -> dict:
         if not abort.pause(min(8, 2 ** attempt) + random.random(), sleep=time.sleep):
             log("grok_abandoned")
             return empty("shutdown")
+        attempt += 1
     _fail_streak += 1
     return _fallback(f"grok_failed streak={_fail_streak}", changed)
 

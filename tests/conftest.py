@@ -22,6 +22,8 @@ os.environ["HOME"] = str(_HOME)
 os.environ["REX_SIM"] = "1"
 os.environ.pop("XAI_API_KEY", None)
 os.environ.pop("XAI_KEY", None)
+os.environ.pop("GROK_OAUTH_TOKEN", None)
+os.environ.pop("GROK_OAUTH_REFRESH_TOKEN", None)
 os.environ.pop("PIDOG_PRIMARY_HUMAN", None)
 # Feature flags and tokens must not leak in from the developer environment.
 # REX_SIM stays on so every test uses the software dog.
@@ -76,6 +78,8 @@ def isolate(tmp_path, monkeypatch):
         wake.reset_state()
     except Exception:
         pass
+    os.environ.pop("GROK_OAUTH_TOKEN", None)
+    os.environ.pop("GROK_OAUTH_REFRESH_TOKEN", None)
     main._shutdown.clear()
     main._sig_count = 0
     main._bits.update(hw=None, loco=None, in_shutdown=False)
@@ -84,6 +88,8 @@ def isolate(tmp_path, monkeypatch):
     yield
     signal.signal(signal.SIGINT, prev_int)
     signal.signal(signal.SIGTERM, prev_term)
+    os.environ.pop("GROK_OAUTH_TOKEN", None)
+    os.environ.pop("GROK_OAUTH_REFRESH_TOKEN", None)
     main._shutdown.clear()
     main._sig_count = 0
     main._bits.update(hw=None, loco=None, in_shutdown=False)
