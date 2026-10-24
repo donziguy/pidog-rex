@@ -19,7 +19,7 @@ python3 -m venv ~/.local/stt-venv && ~/.local/stt-venv/bin/pip install vosk
 # download vosk-model-small-en-us-0.15 to ~/.local/share/vosk/
 git clone https://github.com/donziguy/pidog-rex ~/pidog-rex
 mkdir -p ~/.config/pidog && cp ~/pidog-rex/.env.example ~/.config/pidog/security_dog.env
-chmod 600 ~/.config/pidog/security_dog.env   # add XAI_API_KEY, PIDOG_OLLAMA_URL, etc.
+chmod 600 ~/.config/pidog/security_dog.env   # XAI_API_KEY or: python3 grok_login.py
 ```
 Optional service (shelf mode only): `cp rex.service ~/.config/systemd/user/ && systemctl --user daemon-reload`.
 
@@ -93,6 +93,31 @@ GitHub Actions runs it on Python 3.11.
 - Grok is called only on a real scene change (32x24 grayscale thumbnail diff), at least 60 s apart, with
   320 px images, retries with backoff, Ollama fallback. API failures never crash the loop; responses are
   not logged.
+- Grok auth is a SuperGrok / X Premium+ subscription when `GROK_OAUTH_TOKEN` is set, otherwise
+  `XAI_API_KEY`. `REX_GROK_AUTH` is `auto` (default, subscription first), `sub`, or `api`. The
+  subscription path is the NoirOS `grok-sub` core: model `grok-4.7` on `POST https://api.x.ai/v1/responses`
+  with the OAuth token as a Bearer. That core has no separate vision model, so the camera JPEG is an
+  `input_image` on the same request. The metered key stays on chat completions (`PIDOG_GROK_MODEL`,
+  default grok-4.5). A 401/403 on the subscription token refreshes once
+  (`GROK_OAUTH_REFRESH_TOKEN` at `https://auth.x.ai/oauth2/token`). If that fails, Rex logs
+  `grok_auth_expired` and uses `XAI_API_KEY` when one is set. Logs say `grok_auth=sub` or `grok_auth=api`
+  and never the token.
+
+## Grok subscription login
+
+On the Pi, from the checkout:
+
+```bash
+python3 grok_login.py
+```
+
+The script prints a verification URL and a short code. Open the URL on a phone, enter the code, and
+approve. Tokens are written into `~/.config/pidog/security_dog.env` (the file is backed up first and
+kept mode 600). Then reload the user service so it reads the file:
+
+```bash
+systemctl --user restart rex
+```
 - SIGINT and SIGTERM set the shutdown event, stop the legs immediately, and abandon an in-flight Grok
   call or TTS instead of waiting out the HTTP or espeak timeout. A second Ctrl+C lies down, closes
   the hardware, and exits. One Pidog instance, same as a normal shutdown.
