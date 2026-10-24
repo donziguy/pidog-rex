@@ -12,3 +12,7 @@ __pycache__/
 *.jpg
 *.jpeg
 *.wav
+# Face embeddings belong in ~/.config/pidog/faces, never in the repo.
+faces/
+embeddings/
+*.npy

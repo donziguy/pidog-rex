@@ -95,6 +95,36 @@ to walk. That is separate from a mounted-but-miscalibrated IMU, which Rex handle
 it while you are right next to the dog, on a clear floor, ready to grab it. Fix the IMU (reseat cable,
 run SunFounder calibration) instead when you can.
 
+## Face recognition
+
+Off unless `REX_FACE=1`. Rex recognizes people on the Pi (no cloud). The primary human defaults to
+**Cory** (`PIDOG_PRIMARY_HUMAN`). A known face is greeted by name. A face a real detector cannot
+match is a stranger: Rex says so, remembers the sighting, and does **not** add them to the gallery.
+The Pillow fallback (used in CI, and when neither dlib nor OpenCV is installed) only confirms
+enrolled people. It will not call an empty shelf a stranger. For stranger detection on the Pi,
+install one of:
+
+* `face_recognition` (dlib), or
+* OpenCV with YuNet + SFace model files (`REX_YUNET_MODEL`, `REX_SFACE_MODEL`), or
+* stock OpenCV, which uses the frontal Haar cascade and embeds the crop locally
+
+`REX_FACE_BACKEND` is `auto` (that order), or `pillow` / `opencv` / `face_recognition`.
+
+Embeddings are stored in `~/.config/pidog/faces/index.json` (override with `REX_FACE_DIR`). That
+directory is outside the repo and listed in `.gitignore`. Do not commit it.
+
+```bash
+REX_SIM=1 python3 faces.py enroll Cory --image cory.jpg
+REX_SIM=1 python3 faces.py list
+REX_SIM=1 python3 faces.py recognize --image cory.jpg
+# from the live camera, only when the rex service is stopped (one Pidog at a time):
+REX_FACE=1 python3 faces.py enroll Cory
+```
+
+The dashboard gains an "Enroll from camera" button when the face module is loaded. The enroll
+route still returns `face_disabled` until `REX_FACE=1`. In simulation, `dog.people` can inject a
+sighting (`name`, `bbox` as x,y,w,h in 0..1, `known` or `stranger`) without a model.
+
 ## Web dashboard
 
 Off unless `REX_DASH=1`. Rex then serves a small page (Flask) at `REX_DASH_HOST`:`REX_DASH_PORT`,
@@ -125,8 +155,8 @@ Bind stays configurable; on a Pi that shares a LAN, prefer a token you would not
 `config.py` settings/logging, `brain.py` personality/mood/memory, `hardware.py` PiDog + camera,
 `sim.py` simulated dog (`REX_SIM` / `--sim` only; not imported on the Pi), `safety.py` SafetyMonitor,
 `locomotion.py` patrol, `vision_grok.py` Grok vision, `audio.py` TTS/SFX/voice, `dashboard.py` local
-web UI (off unless `REX_DASH=1`), `main.py` entry point, `sensorcheck.py` read-only sensor check,
-`tests/` pytest suite.
+web UI (off unless `REX_DASH=1`), `faces.py` local face enrollment (off unless `REX_FACE=1`),
+`main.py` entry point, `sensorcheck.py` read-only sensor check, `tests/` pytest suite.
 
 ## License
 MIT

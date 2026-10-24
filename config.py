@@ -67,7 +67,7 @@ def xai_key() -> str | None:
 
 
 # Identity / memory
-PRIMARY_HUMAN = os.environ.get("PIDOG_PRIMARY_HUMAN", "Boss")
+PRIMARY_HUMAN = os.environ.get("PIDOG_PRIMARY_HUMAN", "Cory")
 MEMORY_PATH = Path(os.environ.get("PIDOG_MEMORY_PATH", str(Path.home() / ".config" / "pidog" / "rex_memory.json")))
 
 # Grok vision
@@ -129,3 +129,15 @@ DASH_PORT = _i("REX_DASH_PORT", 8080)
 DASH_TOKEN = os.environ.get("REX_DASH_TOKEN", "")
 DASH_ALLOW_PATROL = _b("REX_DASH_ALLOW_PATROL", False)
 DASH_LOG_LINES = max(10, _i("REX_DASH_LOG_LINES", 80))
+
+# Local face recognition. Off unless REX_FACE=1. Embeddings stay in FACE_DIR,
+# outside the repo. Backend "auto" uses face_recognition, then OpenCV YuNet+SFace
+# (or a Haar crop) when those are installed, otherwise a Pillow embedder.
+FACE_ENABLED = _b("REX_FACE", False)
+FACE_DIR = Path(os.environ.get("REX_FACE_DIR") or str(Path.home() / ".config" / "pidog" / "faces"))
+FACE_BACKEND = os.environ.get("REX_FACE_BACKEND", "auto").strip().lower() or "auto"
+FACE_THRESHOLD = _f("REX_FACE_THRESHOLD", 0.35)  # cosine distance; lower is a tighter match
+FACE_GREET_COOLDOWN = _f("REX_FACE_GREET_COOLDOWN", 90)
+FACE_STRANGER_COOLDOWN = _f("REX_FACE_STRANGER_COOLDOWN", 90)
+YUNET_MODEL = os.environ.get("REX_YUNET_MODEL", "")
+SFACE_MODEL = os.environ.get("REX_SFACE_MODEL", "")
