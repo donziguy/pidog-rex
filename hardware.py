@@ -5,7 +5,7 @@ ultrasonic sensor; that child shows up as a second python process. It is
 expected and is terminated by Pidog.close().
 """
 from __future__ import annotations
-import math, threading, time
+import math, os, threading, time
 from pathlib import Path
 import config as C
 from config import log
@@ -15,12 +15,24 @@ CHEST_COLORS = {"listening": (0, 0, 255), "analyzing": (255, 255, 0), "talking":
                 "alert": (255, 0, 0), "suspicious": (255, 128, 0), "idle": (0, 255, 255), "locked": (255, 0, 255)}
 
 
+def _sim_enabled() -> bool:
+    return os.environ.get("REX_SIM", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 class Hardware:
     def __init__(self):
-        from pidog import Pidog
-        log("pidog_init (legs go to the 'lie' pose they boot in)")
-        self.dog = Pidog()
-        time.sleep(0.8)
+        # Sim is imported only in this branch, so a Pi that never sets REX_SIM
+        # does not import it (and does not import anything new).
+        self.simulated = _sim_enabled()
+        if self.simulated:
+            from sim import SimDog
+            log("sim_init (no physical pidog)")
+            self.dog = SimDog()
+        else:
+            from pidog import Pidog
+            log("pidog_init (legs go to the 'lie' pose they boot in)")
+            self.dog = Pidog()
+            time.sleep(0.8)
         self.head = {"yaw": 0, "roll": 0, "pitch": C.HEAD_PITCH_DEFAULT}
         self._cam = None
         self._cam_lock = threading.Lock()
@@ -136,11 +148,16 @@ class Hardware:
         with self._cam_lock:
             try:
                 if self._cam is None:
-                    from picamera2 import Picamera2
-                    self._cam = Picamera2()
+                    if self.simulated:
+                        from sim import SimCamera
+                        self._cam = SimCamera(self.dog)
+                    else:
+                        from picamera2 import Picamera2
+                        self._cam = Picamera2()
                     self._cam.configure(self._cam.create_still_configuration(main={"size": (640, 480), "format": "RGB888"}))
                     self._cam.start()
-                    time.sleep(1.0)
+                    if not self.simulated:
+                        time.sleep(1.0)
                 self._cam.capture_file(str(PHOTO_PATH))
                 return PHOTO_PATH if PHOTO_PATH.exists() and PHOTO_PATH.stat().st_size > 1000 else None
             except Exception as exc:

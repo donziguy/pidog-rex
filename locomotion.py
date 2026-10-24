@@ -109,12 +109,19 @@ class Locomotion:
             while not dog.is_legs_done():
                 if not self.safety.allow_move():
                     log("walk interrupted by safety")
+                    self.hw.legs_stop()
                     return False
                 if time.time() > deadline:
                     log("walk timeout -> legs_stop")
                     self.hw.legs_stop()
                     return False
                 time.sleep(0.02)
+            # A trip clears the leg buffer, which makes is_legs_done() true. That is
+            # an abort, not a finished step — don't count it.
+            if not self.safety.allow_move():
+                log("walk interrupted by safety")
+                self.hw.legs_stop()
+                return False
             brain.bump("floor_moves")
             return True
         except Exception as exc:

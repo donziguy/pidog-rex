@@ -24,7 +24,7 @@ class SafetyMonitor(threading.Thread):
         self.walking = threading.Event()      # set by Locomotion while legs may move
         self.locked = threading.Event()
         self.reason = ""
-        self._stop = threading.Event()
+        self._halt = threading.Event()  # not named _stop: that shadows Thread._stop and breaks join()
         self._empty = 0
         self._low_batt = 0
         self._last_batt_check = 0.0
@@ -44,9 +44,11 @@ class SafetyMonitor(threading.Thread):
         if not first:
             return
         log(f"SAFETY_TRIP reason={reason} walking={self.walking.is_set()} sensors={self.last}")
-        if self.walking.is_set():
-            self.hw.legs_stop()
-            self.hw.lie_down(speed=70)
+        # Always, not only while `walking` is set. Tilt, low battery, and voice stop
+        # can fire during a backward step or a sit, and those moves leave the walking
+        # flag clear on purpose (distance stop stays off while backing up).
+        self.hw.legs_stop()
+        self.hw.lie_down(speed=70)
         self.walking.clear()
         self.hw.chest("locked")
         brain.bump("safety_trips"); brain.adjust_mood(event="safety"); brain.remember("safety_trip", reason)
@@ -62,17 +64,17 @@ class SafetyMonitor(threading.Thread):
         self.locked.clear(); self.reason = ""; self._empty = 0
 
     def stop(self) -> None:
-        self._stop.set()
+        self._halt.set()
 
     def run(self) -> None:
         log(f"safety_monitor_start poll={C.SAFETY_POLL}s stop_cm={C.SAFETY_STOP_CM} tilt={C.SAFETY_TILT_DEG} batt_low={C.SAFETY_BATTERY_LOW_V}")
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             try:
                 self._tick()
             except Exception as exc:
                 log(f"safety_tick_error={exc}")
             self.ticks += 1
-            self._stop.wait(C.SAFETY_POLL)
+            self._halt.wait(C.SAFETY_POLL)
 
     def _tick(self) -> None:
         hw, walking = self.hw, self.walking.is_set()

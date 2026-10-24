@@ -7,6 +7,8 @@ rex_memory.json
 logs/
 __pycache__/
 *.pyc
+.pytest_cache/
+.venv/
 *.jpg
 *.jpeg
 *.wav

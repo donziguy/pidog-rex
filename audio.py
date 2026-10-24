@@ -108,13 +108,13 @@ class Listener(threading.Thread):
     def __init__(self):
         super().__init__(name="listener", daemon=True)
         self.events: queue.Queue = queue.Queue()
-        self._stop = threading.Event()
+        self._halt = threading.Event()  # not named _stop: that shadows Thread._stop and breaks join()
         self._proc = None
         self.ready = False
         self.on_stop = None  # called immediately (from this thread) on a 'stop' command
 
     def stop(self):
-        self._stop.set()
+        self._halt.set()
         try:
             if self._proc:
                 self._proc.kill()
@@ -153,12 +153,12 @@ class Listener(threading.Thread):
             return
         wav = Path("/tmp/rex_listen.wav")
         secs = max(2, int(round(C.STT_SECONDS)))
-        while not self._stop.is_set():
+        while not self._halt.is_set():
             if speaking.is_set() or time.time() - _last_tts_end < 1.0:
                 time.sleep(0.2); continue
             r = subprocess.run(["arecord", "-q", "-D", C.STT_DEVICE, "-f", "S16_LE", "-r", "16000", "-c", "1",
                                 "-d", str(secs), str(wav)], capture_output=True, text=True, timeout=secs + 6)
-            if self._stop.is_set():
+            if self._halt.is_set():
                 break
             if r.returncode != 0:
                 log(f"arecord_rc={r.returncode}"); time.sleep(1); continue
