@@ -3,7 +3,11 @@
 Triggers (any one):
   * ultrasonic < SAFETY_STOP_CM while walking
   * N consecutive empty ultrasonic reads while walking
-  * body tilt > SAFETY_TILT_DEG (any time)
+  * body tilt > SAFETY_TILT_DEG (any time). Tilt is the angle between the
+    current raw acceleration and the vector captured at startup, not pidog's
+    pitch/roll (those assume gravity is on the accelerometer X axis).
+  * N consecutive IMU read failures (any time). A single miss keeps the last
+    good sample; the streak matches SAFETY_EMPTY_READS.
   * battery below SAFETY_BATTERY_LOW_V for ~3 s (any time)
   * head touch while walking (in shelf mode touch is just a pet)
   * external trip() e.g. the "stop" voice command
@@ -28,7 +32,7 @@ class SafetyMonitor(threading.Thread):
         self._empty = 0
         self._low_batt = 0
         self._last_batt_check = 0.0
-        self.last = {"distance": None, "pitch": 0.0, "roll": 0.0, "battery": None, "touch": "N"}
+        self.last = {"distance": None, "pitch": 0.0, "roll": 0.0, "tilt": 0.0, "battery": None, "touch": "N"}
         self.ticks = 0
         self._trip_lock = threading.Lock()
         self.on_trip = None  # optional callback(reason)
@@ -79,9 +83,14 @@ class SafetyMonitor(threading.Thread):
     def _tick(self) -> None:
         hw, walking = self.hw, self.walking.is_set()
         d = hw.distance(); pitch, roll = hw.tilt(); t = hw.touch()
-        self.last.update(distance=d, pitch=round(pitch, 1), roll=round(roll, 1), touch=t)
-        if abs(pitch) > C.SAFETY_TILT_DEG or abs(roll) > C.SAFETY_TILT_DEG:
-            self.trip(f"tilt pitch={pitch:.0f} roll={roll:.0f}")
+        tilt_deg = float(getattr(hw, "tilt_deg", max(abs(pitch), abs(roll))))
+        self.last.update(distance=d, pitch=round(pitch, 1), roll=round(roll, 1), tilt=round(tilt_deg, 1), touch=t)
+        # The angle is the trip, not max(|pitch|, |roll|). On a tilted mount a
+        # 35 deg rotation can split into two components that are each under 30.
+        if tilt_deg > C.SAFETY_TILT_DEG:
+            self.trip(f"tilt {tilt_deg:.0f} pitch={pitch:.0f} roll={roll:.0f}")
+        elif int(getattr(hw, "imu_fail_streak", 0) or 0) >= C.SAFETY_EMPTY_READS:
+            self.trip("imu_read_fail")
         now = time.time()
         if now - self._last_batt_check >= 1.0:
             self._last_batt_check = now

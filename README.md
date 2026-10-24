@@ -73,9 +73,13 @@ GitHub Actions runs it on Python 3.11.
 
 ## Safety
 - SafetyMonitor thread polls ~10 Hz, independent of the main loop. It trips on: obstacle < 25 cm or
-  repeated empty ultrasonic reads while walking, tilt > 30 deg, battery < 6.6 V for 3 s, head touch while
-  walking, or the voice command "stop". A trip clears the leg queue, lies down, and locks out movement
-  until restart or "rex patrol".
+  repeated empty ultrasonic reads while walking, tilt > 30 deg from the pose at startup, repeated IMU
+  read failures, battery < 6.6 V for 3 s, head touch while walking, or the voice command "stop". A trip
+  clears the leg queue, lies down, and locks out movement until restart or "rex patrol".
+- Tilt is the angle between the current raw accelerometer vector and a baseline averaged at startup.
+  pidog's own pitch/roll are not used: its calibration forces the boot pose to `ax=-16384`, which is
+  wrong when gravity is on Y/Z, and a real tilt then stays under 30 deg. `python3 sensorcheck.py --imu`
+  prints the live angle for a hand test.
 - Walking defaults: speed 65, 1-2 steps per move, halts on missing distance readings, 120 s patrol cap
   then rest.
 - Grok is called only on a real scene change (32x24 grayscale thumbnail diff), at least 60 s apart, with
@@ -83,9 +87,9 @@ GitHub Actions runs it on Python 3.11.
   not logged.
 - SIGTERM: stop legs, lie down, close hardware cleanly.
 
-## Known issue: IMU (gyro) init failure
-On the author's unit the SH3001 IMU reports `imu_sh3001 init ... fail`, so tilt reads 0 and the tilt stop
-cannot work. `--patrol` refuses to walk when the IMU is unavailable.
+## Known issue: IMU init failure
+If the SH3001 fails to init (`imu_sh3001 init ... fail`), there is no tilt signal and `--patrol` refuses
+to walk. That is separate from a mounted-but-miscalibrated IMU, which Rex handles itself (see Safety).
 
 **`--allow-no-imu` warning:** this overrides that refusal and walks with NO tilt/fall detection. Only use
 it while you are right next to the dog, on a clear floor, ready to grab it. Fix the IMU (reseat cable,
