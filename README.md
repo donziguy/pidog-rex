@@ -125,6 +125,34 @@ The dashboard gains an "Enroll from camera" button when the face module is loade
 route still returns `face_disabled` until `REX_FACE=1`. In simulation, `dog.people` can inject a
 sighting (`name`, `bbox` as x,y,w,h in 0..1, `known` or `stranger`) without a model.
 
+## Follow mode
+
+Follow is **supervised** and **off unless you pass `--follow`**. No environment variable turns it
+on, and it must never be added to `rex.service` (the unit stays shelf-only, same rule as
+`--patrol`). `--follow` and `--patrol` together: follow wins, patrol wander stays off.
+
+Rex steps toward the camera bounding box of a **recognized** person, preferring
+`PIDOG_PRIMARY_HUMAN` (Cory). The box center left of 0.40 turns left, right of 0.60 turns
+right, otherwise he takes one forward step. A stranger is not a target. If the person leaves the frame he takes no step (no search).
+After `REX_FOLLOW_LOST_TICKS` misses in a row (default 5) the session ends. Each step goes
+through the locomotion safety thread
+(distance, tilt, battery, touch). The session stops at `REX_FOLLOW_MAX_STEPS` (default 8) or
+`REX_FOLLOW_MAX_SECONDS` (default 60), then he sits. Speed is `REX_FOLLOW_SPEED` (default 50,
+and never above the patrol speed). An armed guard still refuses to walk. A dead IMU refuses
+follow unless you also passed `--allow-no-imu`, which is the same "stand next to the dog"
+warning as patrol.
+
+```bash
+# You stay in the room. Ctrl-C or "stop" ends it.
+REX_SIM=1 python3 main.py --sim --follow --seconds 20 --no-tts
+python3 main.py --follow --seconds 60
+```
+
+In simulation, `dog.people` entries with `known: true` and a `bbox` of `[x, y, w, h]` (0..1)
+are the target. On the Pi, enroll Cory first (`REX_FACE=1`) so the box comes from a real detector.
+The Pillow fallback only matches an enrolled whole frame, so a proper detector is what makes
+follow useful on hardware.
+
 ## Guard mode
 
 Off unless `REX_GUARD=1`. Even then Rex starts **disarmed** unless `REX_GUARD_ARMED=1` (or you arm
@@ -175,9 +203,9 @@ Bind stays configurable; on a Pi that shares a LAN, prefer a token you would not
 `config.py` settings/logging, `brain.py` personality/mood/memory, `hardware.py` PiDog + camera,
 `sim.py` simulated dog (`REX_SIM` / `--sim` only; not imported on the Pi), `safety.py` SafetyMonitor,
 `locomotion.py` patrol, `vision_grok.py` Grok vision, `audio.py` TTS/SFX/voice, `dashboard.py` local
-web UI (off unless `REX_DASH=1`), `faces.py` local face enrollment (off unless `REX_FACE=1`), `guard.py` shelf guard alerts
-(off unless `REX_GUARD=1`), `main.py` entry point, `sensorcheck.py` read-only sensor check,
-`tests/` pytest suite.
+web UI (off unless `REX_DASH=1`), `faces.py` local face enrollment (off unless `REX_FACE=1`), `guard.py` shelf guard alerts (off unless `REX_GUARD=1`), `follow.py` supervised follow
+(`--follow` only, never in `rex.service`), `main.py` entry point,
+`sensorcheck.py` read-only sensor check, `tests/` pytest suite.
 
 ## License
 MIT

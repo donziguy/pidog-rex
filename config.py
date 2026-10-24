@@ -156,3 +156,11 @@ NTFY_TOPIC = os.environ.get("REX_NTFY_TOPIC", "")
 NTFY_SERVER = (os.environ.get("REX_NTFY_SERVER") or "https://ntfy.sh").rstrip("/")
 NTFY_TOKEN = os.environ.get("REX_NTFY_TOKEN", "")
 ALERT_WEBHOOK_URL = os.environ.get("REX_ALERT_WEBHOOK_URL", "")
+
+# Follow mode is NOT enabled by an environment variable. The process has to be
+# started with --follow, which must never be added to rex.service. These only
+# tune a session that was started that way.
+FOLLOW_MAX_STEPS = max(1, _i("REX_FOLLOW_MAX_STEPS", 8))
+FOLLOW_MAX_SECONDS = _f("REX_FOLLOW_MAX_SECONDS", 60)
+FOLLOW_LOST_TICKS = max(1, _i("REX_FOLLOW_LOST_TICKS", 5))
+FOLLOW_SPEED = min(WALK_SPEED, _i("REX_FOLLOW_SPEED", 50))
