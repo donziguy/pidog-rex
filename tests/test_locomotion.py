@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 
+import brain
 import config as C
 import sim
 from locomotion import Locomotion
@@ -138,6 +139,71 @@ def test_session_cap_then_rest(make_hw, monkeypatch):
     assert loco.tick() == "resting"
     clock.t = loco.rest_until  # rest is over; the next session just started
     assert loco.tick() == "forward"
+
+
+def test_speed_65_walk_outlasts_the_old_fixed_deadline():
+    """robot_hat spends (-9.9*speed+1000) ms on every angle group.
+
+    A walk cycle is 49 groups. At speed 65 that is ~17 s for one step and ~35 s
+    for two, past the old ``8 + 3*steps`` deadline that logged walk timeout.
+    """
+    from locomotion import WALK_CYCLE_FRAMES, expected_leg_frames, leg_wait_budget, servo_frame_seconds
+    frame = servo_frame_seconds(65)
+    assert frame == pytest.approx((-9.9 * 65 + 1000) / 1000)
+    one = WALK_CYCLE_FRAMES * frame
+    two = expected_leg_frames("forward", 2) * frame
+    assert one > 8 + 3 * 1
+    assert two > 8 + 3 * 2
+    assert leg_wait_budget(65, 1, WALK_CYCLE_FRAMES) > one
+    assert leg_wait_budget(65, 2, expected_leg_frames("forward", 2)) > two
+
+
+@pytest.mark.parametrize("cm, steps", [(100, 2), (45, 1)])
+def test_walk_completes_when_frames_take_longer_than_the_old_deadline(make_hw, monkeypatch, capsys, cm, steps):
+    from locomotion import expected_leg_frames, servo_frame_seconds
+    clock = sim.ManualClock(5_000.0)
+    sim.configure(clock=clock, realistic_legs=True)
+    monkeypatch.setattr("locomotion.time.time", clock.time)
+    monkeypatch.setattr("locomotion.time.sleep", lambda dt: clock.advance(dt))
+    hw = make_hw()
+    loco = Locomotion(hw, SafetyMonitor(hw))
+    hw.dog.distance.set(cm)
+    assert loco.enable("test")
+    before = brain.memory()["stats"]["floor_moves"]
+    started = clock.t
+    assert loco.tick() == "forward"
+    elapsed = clock.t - started
+    frames = expected_leg_frames("forward", steps)
+    assert hw.dog.action_log[-1] == {"action": "forward", "steps": steps, "speed": 65}
+    assert len(hw.dog.legs_action_buffer) == 0
+    assert elapsed > 8 + 3 * steps
+    assert elapsed == pytest.approx(frames * servo_frame_seconds(65), abs=0.05)
+    assert hw.dog.legs_stop_calls == 0
+    assert brain.memory()["stats"]["floor_moves"] == before + 1
+    assert "walk timeout" not in capsys.readouterr().out
+
+
+def test_stalled_leg_buffer_still_times_out(make_hw, monkeypatch, capsys):
+    from locomotion import expected_leg_frames, leg_stall_seconds, leg_wait_budget, servo_frame_seconds
+    clock = sim.ManualClock(0.0)
+    sim.configure(clock=clock, realistic_legs=True)
+    monkeypatch.setattr("locomotion.time.time", clock.time)
+    monkeypatch.setattr("locomotion.time.sleep", lambda dt: clock.advance(dt))
+    hw = make_hw()
+    hw.dog.pause_legs()  # servo thread never pops, so the buffer never shrinks
+    loco = Locomotion(hw, SafetyMonitor(hw))
+    hw.dog.distance.set(100)
+    assert loco.enable("test")
+    before = brain.memory()["stats"]["floor_moves"]
+    assert loco.tick() == "aborted"
+    frames = expected_leg_frames("forward", 2)
+    full = frames * servo_frame_seconds(65)
+    assert clock.t > leg_stall_seconds(65)
+    assert clock.t < full
+    assert clock.t < leg_wait_budget(65, 2, frames)
+    assert hw.dog.legs_stop_calls >= 1
+    assert brain.memory()["stats"]["floor_moves"] == before
+    assert "walk timeout -> legs_stop" in capsys.readouterr().out
 
 
 def test_patrol_refused_without_imu_unless_allowed(make_hw):

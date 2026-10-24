@@ -24,7 +24,8 @@ dogs: list = []
 
 
 def configure(**kwargs) -> None:
-    """Overrides for the next dogs: ``imu`` (bool), ``clock``, ``step_seconds``."""
+    """Overrides for the next dogs: ``imu`` (bool), ``clock``, ``step_seconds``,
+    ``imu_mount`` (raw accel at rest), ``realistic_legs`` (pidog's per-frame buffer)."""
     _pending.update(kwargs)
 
 
@@ -257,6 +258,17 @@ class SimDog:
         self.sound = Sensor(None, self.clock)
         self.imu_pitch = Sensor(0.0, self.clock)
         self.imu_roll = Sensor(0.0, self.clock)
+        # None: synthesize raw counts from pitch/roll and imu_mount. A tuple
+        # pins the raw vector (used to tilt the dog without going through pitch/roll).
+        self.imu_raw = Sensor(None, self.clock)
+        mount = cfg.get("imu_mount", (-16384.0, 0.0, 0.0))
+        self.imu_mount = (float(mount[0]), float(mount[1]), float(mount[2]))
+        self.imu_read_ok = True
+        self.imu = self  # pidog exposes Sh3001 as dog.imu
+        self.realistic_legs = bool(cfg.get("realistic_legs", False))
+        self._frame_total = 0
+        self._frame_s = 0.0
+        self._motion_t0 = 0.0
         self.frames = Sensor(None, self.clock)
         self.ears = _Ears(self)
         self.dual_touch = _Touch(self)
@@ -295,6 +307,19 @@ class SimDog:
     @roll.setter
     def roll(self, value) -> None:
         self.imu_roll.set(float(value))
+
+    def _sh3001_getimudata(self):
+        """Raw accel counts, the way pidog reads the SH3001 before applying offsets."""
+        if not self.imu_read_ok:
+            return False
+        raw = self.imu_raw.peek()
+        if raw is not None:
+            return ([float(x) for x in raw], [0.0, 0.0, 0.0])
+        from hardware import raw_accel_for_attitude
+        pitch = float(self.imu_pitch.peek() or 0.0)
+        roll = float(self.imu_roll.peek() or 0.0)
+        vec = raw_accel_for_attitude(self.imu_mount, pitch, roll)
+        return ([float(x) for x in vec], [0.0, 0.0, 0.0])
 
     def read_distance(self):
         return self.distance.read()
@@ -338,11 +363,47 @@ class SimDog:
         self._action_active = True
         self._cancelled = False
         self._action_done_at = self.clock.monotonic() + self.step_seconds * max(1, steps)
-        self.legs_action_buffer.append(action)
+        if self.realistic_legs:
+            # Match pidog: the buffer holds one entry per angle group, and the
+            # legs thread pops it only after servo_move returns. Walk cycles are
+            # 8 sections * 6 steps + the closing pose.
+            from locomotion import expected_leg_frames, servo_frame_seconds
+            frames = expected_leg_frames(action, steps)
+            self._frame_total = frames
+            self._frame_s = servo_frame_seconds(speed)
+            self._motion_t0 = self.clock.monotonic()
+            del self.legs_action_buffer[:]
+            for _ in range(frames):
+                self.legs_action_buffer.append(action)
+        else:
+            self.legs_action_buffer.append(action)
         self.action_started.clear()
         self.action_started.set()
 
+    def _drain_legs(self) -> None:
+        if not self.realistic_legs or not self._action_active or self._cancelled:
+            return
+        if self.hold_legs is not None and not self.hold_legs.is_set():
+            return
+        elapsed = self.clock.monotonic() - self._motion_t0
+        if self._frame_s <= 0:
+            finished = self._frame_total
+        else:
+            finished = min(self._frame_total, int(elapsed / self._frame_s + 1e-9))
+        target = self._frame_total - finished
+        while len(self.legs_action_buffer) > target:
+            list.pop(self.legs_action_buffer)
+        if target == 0:
+            self._action_active = False
+
     def is_legs_done(self) -> bool:
+        if self.realistic_legs:
+            self._drain_legs()
+            if self._cancelled or not self._action_active:
+                return True
+            if self.hold_legs is not None and not self.hold_legs.is_set():
+                return False
+            return len(self.legs_action_buffer) == 0
         if not self._action_active or self._cancelled:
             return True
         if self.hold_legs is not None and not self.hold_legs.is_set():

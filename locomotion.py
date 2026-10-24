@@ -10,6 +10,49 @@ import config as C
 from config import log
 import brain
 
+# pidog Walk: 8 sections * 6 steps, plus the closing pose that returns to the
+# origin. do_action queues that many angle groups per step. robot_hat 2.3.5
+# Robot.servo_move spends (-9.9 * speed + 1000) ms on each group (at least
+# 10 ms) before pidog pops it. At speed 65 that is ~0.36 s * 49 = ~17 s per
+# step, ~35 s for two. The old deadline of 8 + 3*steps (11 s / 14 s) always
+# fired "walk timeout -> legs_stop" before the buffer could empty.
+WALK_CYCLE_FRAMES = 49
+_WALK_ACTIONS = {"forward", "backward", "turn_left", "turn_right", "trot"}
+
+
+def servo_frame_seconds(speed: float) -> float:
+    """Nominal seconds for one leg angle-group at ``speed`` (robot_hat 2.3.5)."""
+    speed = max(0.0, min(100.0, float(speed)))
+    return max(0.010, (-9.9 * speed + 1000.0) / 1000.0)
+
+
+def expected_leg_frames(action: str, steps: int) -> int:
+    per = WALK_CYCLE_FRAMES if action in _WALK_ACTIONS else 1
+    return per * max(1, int(steps))
+
+
+def leg_wait_budget(speed: float, steps: int, queued: int) -> float:
+    """Wall-clock seconds to allow a queued leg action to finish.
+
+    4x the nominal frame time covers I2C overrun in servo_move (each 10 ms
+    step writes every leg servo). The ``8 + 3*steps`` floor keeps a one-pose
+    action, and the simulator's single-token step timer, at least as long as
+    the previous deadline.
+    """
+    frames = max(1, int(queued))
+    nominal = frames * servo_frame_seconds(speed) * 4.0 + 1.0
+    return max(8.0 + 3.0 * max(1, int(steps)), nominal)
+
+
+def leg_stall_seconds(speed: float) -> float:
+    """How long the leg buffer may sit still before the servo thread is stuck.
+
+    pidog pops a group only after ``servo_move`` returns, so a live walk
+    shrinks the buffer about once per frame. Several times that, with a 3 s
+    floor, is a stall. A one-group action (sit) uses the overall budget instead.
+    """
+    return max(3.0, servo_frame_seconds(speed) * 8.0)
+
 
 class Locomotion:
     def __init__(self, hw, safety):
@@ -104,14 +147,36 @@ class Locomotion:
         if walking and action != "backward":
             self.safety.walking.set()   # monitor enforces stop distance (not while backing away)
         try:
+            before = _buffer_len(dog)
             dog.do_action(action, step_count=steps, speed=speed)
-            deadline = time.time() + 8 + 3 * steps
+            # Real pidog and the realistic sim: the buffer is what's left to
+            # run. The plain sim appends a token and never drops old ones, so
+            # only the growth from this call is this step's queue.
+            if getattr(dog, "realistic_legs", False):
+                queued = _buffer_len(dog)
+            else:
+                queued = _buffer_len(dog) - before
+            if queued <= 0 and not dog.is_legs_done():
+                queued = expected_leg_frames(action, steps)
+            # A multi-group queue that stops shrinking is a stuck servo thread.
+            # One group (sit, or the sim's single token) is watched by the budget.
+            stall_s = leg_stall_seconds(speed) if queued > 1 else None
+            deadline = time.time() + leg_wait_budget(speed, steps, max(queued, 1))
+            last_len = _buffer_len(dog)
+            last_change = time.time()
             while not dog.is_legs_done():
                 if not self.safety.allow_move():
                     log("walk interrupted by safety")
                     self.hw.legs_stop()
                     return False
-                if time.time() > deadline:
+                now = time.time()
+                n = _buffer_len(dog)
+                if n < last_len:
+                    last_len = n
+                    last_change = now
+                # `stall_s` is set only for a multi-group queue, so a buffer that
+                # never shrinks (thread dead before the first pop) times out too.
+                if (stall_s is not None and (now - last_change) > stall_s) or now > deadline:
                     log("walk timeout -> legs_stop")
                     self.hw.legs_stop()
                     return False
@@ -130,3 +195,10 @@ class Locomotion:
             return False
         finally:
             self.safety.walking.clear()
+
+
+def _buffer_len(dog) -> int:
+    try:
+        return len(dog.legs_action_buffer)
+    except Exception:
+        return 0
