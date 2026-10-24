@@ -270,6 +270,9 @@ class SimDog:
         self._frame_s = 0.0
         self._motion_t0 = 0.0
         self.frames = Sensor(None, self.clock)
+        # Optional scripted sightings for face / follow tests:
+        # [{"name": "Cory", "bbox": [x, y, w, h], "known": True}]
+        self.people = Sensor(list(cfg.get("people") or []), self.clock)
         self.ears = _Ears(self)
         self.dual_touch = _Touch(self)
         self.rgb_strip = _Strip(self)

@@ -117,6 +117,10 @@ def adjust_mood(analysis: dict | None = None, event: str = "idle") -> dict:
             a += 1; b -= 4; s += 1; e -= 1
         elif event == "safety":
             a += 10; e -= 5
+        elif event == "stranger":
+            a += 6; s += 14; b -= 8
+        elif event == "greet":
+            a -= 4; b -= 6; s -= 4
         elif analysis:
             interesting = any(analysis.get(k) for k in ("has_person", "has_dog", "has_animal", "has_suspicious_object"))
             threat = str(analysis.get("threat_level", "none")).lower()

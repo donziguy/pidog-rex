@@ -74,6 +74,10 @@ _PAGE = """<!DOCTYPE html>
     <label>Head pitch <input id="pitch" type="number" value="18" min="-60" max="60"></label>
     <button type="submit">Move head</button>
   </form>
+  <form id="enroll-form">
+    <label>Enroll face <input id="enroll-name" type="text" maxlength="40" placeholder="Cory"></label>
+    <button type="submit">Enroll from camera</button>
+  </form>
   <h2>Log</h2>
   <pre id="log"></pre>
 </main>
@@ -112,6 +116,10 @@ document.getElementById("patrol").onclick = () => api("/api/mode", {method: "POS
 document.getElementById("speak-form").onsubmit = (ev) => {
   ev.preventDefault();
   api("/api/speak", {method: "POST", body: JSON.stringify({text: document.getElementById("speak").value})});
+};
+document.getElementById("enroll-form").onsubmit = (ev) => {
+  ev.preventDefault();
+  api("/api/enroll", {method: "POST", body: JSON.stringify({name: document.getElementById("enroll-name").value})});
 };
 document.getElementById("head-form").onsubmit = (ev) => {
   ev.preventDefault();
@@ -344,10 +352,10 @@ class Dashboard:
             dash.loco.disable("dashboard_stop")
             return jsonify({"ok": True, "stopped": True})
 
+        self.app = app
         self.status_hooks = []
         for ext in extensions:
             ext(self)
-        self.app = app
         return app
 
     def start(self) -> bool:

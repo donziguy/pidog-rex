@@ -21,6 +21,7 @@ os.environ["HOME"] = str(_HOME)
 os.environ["REX_SIM"] = "1"
 os.environ.pop("XAI_API_KEY", None)
 os.environ.pop("XAI_KEY", None)
+os.environ.pop("PIDOG_PRIMARY_HUMAN", None)
 # Feature flags and tokens must not leak in from the developer environment.
 # REX_SIM stays on so every test uses the software dog.
 for _key in list(os.environ):
@@ -49,6 +50,12 @@ os.environ["PYTHONPATH"] = os.pathsep.join(_py_path)
 def isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(C, "MEMORY_PATH", tmp_path / "rex_memory.json")
     monkeypatch.setattr(C, "LOG_PATH", tmp_path / "rex.log")
+    monkeypatch.setattr(C, "FACE_DIR", tmp_path / "faces")
+    try:
+        import faces
+        faces.reset_state()
+    except Exception:
+        pass
     brain._mem = None
     brain.state = "booting"
     brain._last_mutter = 0.0

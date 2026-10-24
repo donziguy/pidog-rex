@@ -81,6 +81,12 @@ def run(args) -> int:
     session = Session(hw, safety, loco, listener, tts, args)
     dash = Dashboard(session)
     session.dash = dash
+    face_mod = None
+    try:
+        import faces as face_mod
+        face_mod.ensure_registered()
+    except Exception as exc:
+        log(f"faces_unavailable={type(exc).__name__}")
     dash.start()
     brain.memory(); brain.set_state("online")
     deadline = time.time() + args.seconds if args.seconds else None
@@ -128,6 +134,8 @@ def run(args) -> int:
             hw.chest("listening")
             # 4) vision (Grok only on real change, >=60 s apart)
             photo = hw.photo()
+            if face_mod is not None and C.FACE_ENABLED:
+                face_mod.observe(session, photo)
             if photo:
                 force = args.force_first_grok and grok_calls == 0
                 hw.chest("analyzing")
