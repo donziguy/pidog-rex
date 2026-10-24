@@ -21,6 +21,11 @@ os.environ["HOME"] = str(_HOME)
 os.environ["REX_SIM"] = "1"
 os.environ.pop("XAI_API_KEY", None)
 os.environ.pop("XAI_KEY", None)
+# Feature flags and tokens must not leak in from the developer environment.
+# REX_SIM stays on so every test uses the software dog.
+for _key in list(os.environ):
+    if _key.startswith("REX_") and _key != "REX_SIM":
+        os.environ.pop(_key, None)
 
 import pytest
 import requests
@@ -53,6 +58,8 @@ def isolate(tmp_path, monkeypatch):
     vision_grok._last_call = 0.0
     vision_grok._fail_streak = 0
     sim.reset()
+    import dashboard
+    dashboard.extensions.clear()
     audio.speaking.clear()
     main._shutdown.clear()
     prev_int = signal.getsignal(signal.SIGINT)
@@ -62,7 +69,7 @@ def isolate(tmp_path, monkeypatch):
     signal.signal(signal.SIGTERM, prev_term)
     main._shutdown.clear()
     for thread in threading.enumerate():
-        if thread.name in {"safety", "listener"} and thread is not threading.current_thread():
+        if thread.name in {"safety", "listener", "dashboard"} and thread is not threading.current_thread():
             stopper = getattr(thread, "stop", None)
             if stopper:
                 stopper()
