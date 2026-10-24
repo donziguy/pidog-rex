@@ -9,6 +9,9 @@ import brain
 speaking = threading.Event()
 _last_tts_end = 0.0
 muted = False  # Home Assistant mute switch. Default off.
+# When set, called with the transcript. Return None to drop it, "" if the
+# wake word was heard with no command, or the command text to parse.
+command_filter = None
 
 
 def speak(text: str, enabled: bool = True) -> None:
@@ -106,6 +109,21 @@ def parse_command(text: str) -> str | None:
     return None
 
 
+def apply_heard(text: str):
+    """Return ``(command, text)`` or None when the wake-word gate drops the line.
+
+    ``command`` is ``""`` when the wake word was heard without a command yet.
+    """
+    if command_filter is not None:
+        accepted = command_filter(text)
+        if accepted is None:
+            return None
+        if not str(accepted).strip():
+            return "", text
+        text = str(accepted)
+    return parse_command(text), text
+
+
 class Listener(threading.Thread):
     """Records short clips back-to-back and pushes (command|None, text) onto self.events."""
 
@@ -169,14 +187,41 @@ class Listener(threading.Thread):
             if self._peak(wav) < C.STT_MIN_PEAK:
                 continue
             try:
-                self._proc.stdin.write(str(wav) + "\n"); self._proc.stdin.flush()
-                text = self._proc.stdout.readline().strip()
+                text = self._transcribe(wav)
             except Exception as exc:
                 log(f"stt_worker_died={exc}"); self.ready = False; return
+            if getattr(C, "WAKE_WORD", False):
+                try:
+                    import wake
+                    if wake.audio_has_wake_file(wav):
+                        wake.arm()
+                except Exception as exc:
+                    log(f"wake_error={type(exc).__name__}")
+                    continue
             if text:
-                cmd = parse_command(text)
-                log(f"heard text_len={len(text)} cmd={cmd}")
+                heard = apply_heard(text)
+                if heard is None:
+                    log(f"wake_gated text_len={len(text)}")
+                    continue
+                cmd, text = heard
+                label = cmd if cmd else ("wake" if cmd == "" else "none")
+                log(f"heard text_len={len(text)} cmd={label}")
                 brain.bump("stt_transcripts")
                 if cmd == "stop" and self.on_stop:
                     self.on_stop()
-                self.events.put((cmd, text))
+                if cmd:
+                    self.events.put((cmd, text))
+                elif cmd == "":
+                    log("wake_word")
+
+    def _transcribe(self, wav: Path) -> str:
+        def vosk_line() -> str:
+            self._proc.stdin.write(str(wav) + "\n")
+            self._proc.stdin.flush()
+            return self._proc.stdout.readline().strip()
+
+        engine = (getattr(C, "STT_ENGINE", "vosk") or "vosk").lower()
+        if engine == "whisper" or getattr(C, "WAKE_WORD", False):
+            import wake
+            return wake.transcribe_wav(wav, lambda _path: vosk_line())
+        return vosk_line()

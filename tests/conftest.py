@@ -69,6 +69,12 @@ def isolate(tmp_path, monkeypatch):
     dashboard.extensions.clear()
     audio.speaking.clear()
     audio.muted = False
+    audio.command_filter = None
+    try:
+        import wake
+        wake.reset_state()
+    except Exception:
+        pass
     main._shutdown.clear()
     prev_int = signal.getsignal(signal.SIGINT)
     prev_term = signal.getsignal(signal.SIGTERM)
