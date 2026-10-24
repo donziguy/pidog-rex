@@ -65,7 +65,85 @@ def test_plan_halts_and_trips_when_distance_is_missing(rig):
     hw.dog.distance.set(None)
     assert loco.plan() == ("halt", 0)
     assert_halted(mon, hw.dog)
-    assert mon.reason == "distance_empty_before_move"
+    assert mon.reason == "distance_empty_before_move empty=5"
+
+
+def test_sample_distance_uses_the_median_of_valid_reads(rig):
+    from locomotion import sample_distance
+    hw, _mon, _loco = rig
+    hw.dog.distance.queue([None, None, 40, None, 100])
+    median, empty = sample_distance(hw)
+    assert median == 70
+    assert empty == 3
+    # out of the 2-400 cm window counts as empty; the last good echo repeats
+    hw.dog.distance.queue([1, 500, 40])
+    median, empty = sample_distance(hw)
+    assert median == 40
+    assert empty == 2
+    hw.dog.distance.set(None)
+    median, empty = sample_distance(hw)
+    assert median is None
+    assert empty == 5
+
+
+def test_plan_levels_the_ultrasonic(rig):
+    """Shelf pitch 18 with pitch_comp -15 is +3° at yaw 0 and nose-down at ±35.
+
+    The walk pose commands the pitch that cancels pitch_comp, so the servo is level.
+    """
+    hw, _mon, loco = rig
+    hw.dog.distance.set(100)
+    assert loco.plan() == ("forward", 2)
+    assert hw.head["yaw"] == 0
+    assert hw.head["pitch"] == hw.level_pitch(0) == -C.HEAD_PITCH_COMP
+    assert hw.head["pitch"] != C.HEAD_PITCH_DEFAULT
+    assert _servo_pitch(0, 0, hw.head["pitch"]) == pytest.approx(0)
+
+
+def test_scan_levels_the_head_at_each_yaw(rig):
+    hw, _mon, loco = rig
+    hw.dog.distance_by_yaw({0: 35, 35: 90, -35: 20})
+    assert loco.plan() == ("turn_left", 2)
+    yaws = []
+    for cmd in hw.dog.head_commands:
+        yaw, _roll, pitch = cmd["frames"][-1]
+        yaws.append(yaw)
+        assert pitch == hw.level_pitch(yaw)
+        assert _servo_pitch(yaw, 0, pitch) == pytest.approx(0, abs=0.6)
+    assert 35 in yaws and -35 in yaws
+
+
+def test_walk_holds_a_level_head(rig):
+    hw, _mon, loco = rig
+    hw.move_head(0, 0, C.HEAD_PITCH_DEFAULT)
+    hw.dog.distance.set(100)
+    assert loco._do("forward", 1, 65, walking=True) is True
+    assert hw.head["pitch"] == hw.level_pitch(0, 0)
+
+
+def test_walk_aborts_when_shutdown_is_requested(rig, monkeypatch, capsys):
+    import abort
+    hw, _mon, loco = rig
+    hw.dog.distance.set(100)
+    before = brain.memory()["stats"]["floor_moves"]
+    sleeps = {"n": 0}
+
+    def sleep(_dt):
+        sleeps["n"] += 1
+        if sleeps["n"] >= 4:
+            abort.event.set()
+
+    monkeypatch.setattr("locomotion.time.sleep", sleep)
+    assert loco.tick() == "aborted"
+    assert brain.memory()["stats"]["floor_moves"] == before
+    assert "walk interrupted by shutdown" in capsys.readouterr().out
+    assert hw.dog.legs_stop_calls >= 1
+
+
+def _servo_pitch(yaw, roll, pitch) -> float:
+    """pidog head mix: pitch_servo = roll*|yaw|/90 + pitch*(1-|yaw|/90) + pitch_comp."""
+    ratio = min(1.0, abs(float(yaw)) / 90.0)
+    return float(roll) * ratio + float(pitch) * (1.0 - ratio) + C.HEAD_PITCH_COMP
 
 
 def test_walk_uses_speed_65_and_respects_a_configured_80(rig, monkeypatch):
@@ -177,7 +255,10 @@ def test_walk_completes_when_frames_take_longer_than_the_old_deadline(make_hw, m
     assert hw.dog.action_log[-1] == {"action": "forward", "steps": steps, "speed": 65}
     assert len(hw.dog.legs_action_buffer) == 0
     assert elapsed > 8 + 3 * steps
-    assert elapsed == pytest.approx(frames * servo_frame_seconds(65), abs=0.05)
+    # plan() samples the ultrasonic (5 reads, 4 gaps) before the leg frames run.
+    from locomotion import DISTANCE_SAMPLES, DISTANCE_SAMPLE_GAP
+    sampling = (DISTANCE_SAMPLES - 1) * DISTANCE_SAMPLE_GAP
+    assert elapsed == pytest.approx(frames * servo_frame_seconds(65) + sampling, abs=0.05)
     assert hw.dog.legs_stop_calls == 0
     assert brain.memory()["stats"]["floor_moves"] == before + 1
     assert "walk timeout" not in capsys.readouterr().out

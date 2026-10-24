@@ -1,8 +1,10 @@
 """SafetyMonitor: independent 10 Hz watchdog that can stop the legs and lock out movement.
 
 Triggers (any one):
-  * ultrasonic < SAFETY_STOP_CM while walking
-  * N consecutive empty ultrasonic reads while walking
+  * ultrasonic < SAFETY_STOP_CM while walking (instant, on any valid reading)
+  * no valid ultrasonic reading for SAFETY_EMPTY_SECONDS while walking
+    (about 1 s; PIDOG_REX_EMPTY_SECONDS or REX_EMPTY_SECONDS). A brief gap
+    from gait vibration does not trip. The trip line includes the empty count.
   * body tilt > SAFETY_TILT_DEG (any time). Tilt is the angle between the
     current raw acceleration and the vector captured at startup, not pidog's
     pitch/roll (those assume gravity is on the accelerometer X axis).
@@ -36,6 +38,7 @@ class SafetyMonitor(threading.Thread):
         self.reason = ""
         self._halt = threading.Event()  # not named _stop: that shadows Thread._stop and breaks join()
         self._empty = 0
+        self._empty_since = None
         self._low_batt = 0
         self._last_batt_check = 0.0
         self.last = {"distance": None, "pitch": 0.0, "roll": 0.0, "tilt": 0.0, "battery": None, "touch": "N"}
@@ -71,7 +74,7 @@ class SafetyMonitor(threading.Thread):
     def reset(self, why: str) -> None:
         if self.locked.is_set():
             log(f"safety_reset why={why} previous_reason={self.reason}")
-        self.locked.clear(); self.reason = ""; self._empty = 0
+        self.locked.clear(); self.reason = ""; self._empty = 0; self._empty_since = None
 
     def stop(self) -> None:
         self._halt.set()
@@ -106,20 +109,23 @@ class SafetyMonitor(threading.Thread):
         elif int(getattr(hw, "imu_fail_streak", 0) or 0) >= C.SAFETY_EMPTY_READS:
             self.trip("imu_read_fail")
         now = time.time()
+        if walking:
+            if d is None:
+                self._empty += 1
+                if self._empty_since is None:
+                    self._empty_since = now
+                elif now - self._empty_since >= C.SAFETY_EMPTY_SECONDS:
+                    self.trip(f"distance_empty empty={self._empty}")
+            else:
+                self._empty = 0
+                self._empty_since = None
+                if d < C.SAFETY_STOP_CM:
+                    self.trip(f"obstacle {d:.0f}cm")
+            if t != "N":
+                self.trip(f"head_touch {t}")
         if now - self._last_batt_check >= 1.0:
             self._last_batt_check = now
             v = hw.battery(); self.last["battery"] = v
             self._low_batt = self._low_batt + 1 if (v is not None and 3.0 < v < C.SAFETY_BATTERY_LOW_V) else 0
             if self._low_batt >= 3:
                 self.trip(f"battery_low {v}V")
-        if walking:
-            if d is None:
-                self._empty += 1
-                if self._empty >= C.SAFETY_EMPTY_READS:
-                    self.trip("distance_empty")
-            else:
-                self._empty = 0
-                if d < C.SAFETY_STOP_CM:
-                    self.trip(f"obstacle {d:.0f}cm")
-            if t != "N":
-                self.trip(f"head_touch {t}")

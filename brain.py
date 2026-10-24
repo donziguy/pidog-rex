@@ -1,7 +1,7 @@
 """Rex personality, mood and memory (ported from security_dog.py; same rex_memory.json format)."""
 from __future__ import annotations
 import json, random, threading, time
-import requests
+import abort
 import config as C
 from config import log
 
@@ -171,7 +171,7 @@ def ollama(prompt: str, timeout: float = 8.0, max_tokens: int = 45) -> str | Non
     if not C.OLLAMA_ENABLED:
         return None
     try:
-        r = requests.post(f"{C.OLLAMA_URL.rstrip('/')}/api/generate", timeout=timeout, json={
+        r = abort.post(f"{C.OLLAMA_URL.rstrip('/')}/api/generate", timeout, json={
             "model": C.OLLAMA_MODEL, "prompt": prompt, "stream": False,
             "options": {"temperature": 0.8, "num_predict": max_tokens}})
         if not r.ok:
@@ -179,6 +179,8 @@ def ollama(prompt: str, timeout: float = 8.0, max_tokens: int = 45) -> str | Non
             return None
         text = str(r.json().get("response", "")).strip().splitlines()
         return text[0].strip(' "')[:180] if text else None
+    except abort.Aborted:
+        return None
     except Exception as exc:
         log(f"ollama_error={type(exc).__name__}")
         return None

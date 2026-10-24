@@ -1,9 +1,9 @@
 """Grok vision with change detection, throttling, retries and an Ollama fallback. Never raises."""
 from __future__ import annotations
 import base64, io, json, random, time
-import requests
 import config as C
 from config import log
+import abort
 import brain
 
 _last_thumb = None
@@ -101,8 +101,8 @@ def analyze(path, force: bool = False) -> dict:
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(img).decode()}}]}]}
     for attempt in range(1, C.GROK_RETRIES + 1):
         try:
-            r = requests.post(C.GROK_URL, json=payload, timeout=C.GROK_TIMEOUT,
-                              headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+            r = abort.post(C.GROK_URL, C.GROK_TIMEOUT, json=payload,
+                           headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
             log(f"grok_status={r.status_code} attempt={attempt} image_bytes={len(img)} diff={diff:.1f}")
             if r.status_code in (400, 401, 403, 404):
                 break  # not retryable
@@ -117,9 +117,15 @@ def analyze(path, force: bool = False) -> dict:
                 _fail_streak = 0
                 log(f"grok_ok threat={a['threat_level']} person={a['has_person']} dog={a['has_dog']}")
                 return a
+        except abort.Aborted:
+            # Don't count this as a failure and don't wait out the socket or the retry sleep.
+            log("grok_abandoned")
+            return empty("shutdown")
         except Exception as exc:
             log(f"grok_exception={type(exc).__name__} attempt={attempt}")
-        time.sleep(min(8, 2 ** attempt) + random.random())
+        if not abort.pause(min(8, 2 ** attempt) + random.random(), sleep=time.sleep):
+            log("grok_abandoned")
+            return empty("shutdown")
     _fail_streak += 1
     return _fallback(f"grok_failed streak={_fail_streak}", changed)
 

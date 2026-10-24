@@ -12,10 +12,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config as C
 from config import log
+import abort
 import brain, audio, vision_grok
 from dashboard import Dashboard
 
-_shutdown = threading.Event()
+_shutdown = abort.event
+_sig_count = 0
+_bits = {"hw": None, "loco": None, "in_shutdown": False}
 
 
 class Session:
@@ -33,8 +36,34 @@ class Session:
 
 
 def _on_signal(signum, frame):
+    """First Ctrl+C stops the legs and abandons Grok/TTS. The second forces exit."""
+    global _sig_count
+    _sig_count += 1
     log(f"signal_received={signum}")
     _shutdown.set()
+    abort.kill_tts()
+    loco = _bits.get("loco")
+    hw = _bits.get("hw")
+    if loco is not None:
+        try:
+            loco.disable("signal")
+        except Exception:
+            pass
+    if hw is not None:
+        try:
+            hw.legs_stop()
+        except Exception:
+            pass
+    if _sig_count < 2:
+        return
+    log("signal_force_shutdown")
+    if not _bits.get("in_shutdown") and hw is not None:
+        _bits["in_shutdown"] = True
+        try:
+            hw.shutdown()
+        except Exception as exc:
+            log(f"signal_force_error={type(exc).__name__}")
+    os._exit(128 + int(signum))
 
 
 def single_instance():
@@ -70,10 +99,12 @@ def run(args) -> int:
         hw.note_stale_override()
     # Install handlers only AFTER Pidog() forks its sensory child, so the child keeps
     # default SIGTERM and actually dies when Pidog.close() terminates it.
-    signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal)
+    abort.install(signal.SIGTERM, _on_signal)
+    abort.install(signal.SIGINT, _on_signal)
     safety = SafetyMonitor(hw, allow_no_imu=bool(getattr(args, "allow_no_imu", False)))
     loco = Locomotion(hw, safety)
+    _bits["hw"] = hw
+    _bits["loco"] = loco
     listener = audio.Listener()
     listener.on_stop = lambda: safety.trip("voice_stop")
     if C.WAKE_WORD:
@@ -136,6 +167,8 @@ def run(args) -> int:
         positions = [(-35, "left"), (0, "center"), (35, "right")]
         i = 0
         while not _shutdown.is_set() and (deadline is None or time.time() < deadline):
+            if _shutdown.is_set():
+                break
             dash.drain()
             # 1) voice commands
             while not listener.events.empty():
@@ -175,21 +208,25 @@ def run(args) -> int:
                 session.guard.tick(photo, session.face_hits)
             if session.follow is not None and session.follow.active and not session.face_hits and face_mod is not None:
                 session.face_hits = face_mod.recognize_hw(hw, photo=photo)
-            if photo:
+            if photo and not _shutdown.is_set():
                 force = args.force_first_grok and grok_calls == 0
                 hw.chest("analyzing")
                 a = vision_grok.analyze(photo, force=force)
-                if not a.get("skipped"):
+                if _shutdown.is_set():
+                    pass
+                elif not a.get("skipped"):
                     grok_calls += a.get("_source") == "grok"
                     brain.update_from_vision(a)
                     gesture(hw, brain.gesture_for(a), tts)
                     if brain.should_speak(a, bool(a.get("_changed"))):
                         hw.chest("talking"); audio.speak(a["roast"], tts)
                         brain.bump("roasts_spoken"); brain.remember("roast", a["roast"]); brain.adjust_mood(event="roast_spoken")
-                elif brain.mutter_due() and not loco.enabled:
+                elif brain.mutter_due() and not loco.enabled and not _shutdown.is_set():
                     audio.speak(brain.idle_mutter(brain.memory().get("last_scene_summary") or "boring shelf duty"), tts)
             hw.chest("locked" if safety.locked.is_set() else "idle")
             # 5) walking (only if enabled and safety allows). Follow replaces patrol wander.
+            if _shutdown.is_set():
+                break
             if session.follow is not None and session.follow.active:
                 session.follow.tick(session.face_hits)
             elif loco.enabled:
@@ -206,6 +243,7 @@ def run(args) -> int:
         log("FATAL:\n" + traceback.format_exc())
         return 1
     finally:
+        _bits["in_shutdown"] = True
         loco.disable("shutdown")
         if getattr(session, "mqtt", None) is not None:
             session.mqtt.stop()

@@ -11,7 +11,7 @@ import config as C
 import sim
 from safety import SafetyMonitor
 from locomotion import Locomotion
-from support import assert_halted
+from support import assert_halted, run_py
 
 
 def test_documented_safety_defaults():
@@ -19,6 +19,7 @@ def test_documented_safety_defaults():
     assert C.SAFETY_TILT_DEG == 30
     assert C.SAFETY_BATTERY_LOW_V == 6.6
     assert C.SAFETY_EMPTY_READS == 3
+    assert C.SAFETY_EMPTY_SECONDS == pytest.approx(1.0)
     assert C.SAFETY_POLL == pytest.approx(0.1)
 
 
@@ -50,26 +51,101 @@ def test_obstacle_while_idle_does_not_trip(make_hw):
     assert hw.dog.legs_stop_calls == 0
 
 
-def test_three_empty_distance_readings_while_walking(make_hw):
+def test_empty_distance_needs_about_a_second_while_walking(make_hw, monkeypatch):
+    """A burst of None at the same instant does not trip. A full second of them does."""
+    clock = sim.ManualClock(100.0)
+    monkeypatch.setattr("safety.time.time", clock.time)
     hw = make_hw()
     mon = _monitor(hw)
     mon.walking.set()
     hw.dog.distance.set(None)
-    for _ in range(C.SAFETY_EMPTY_READS - 1):
+    for _ in range(8):
         mon._tick()
     assert not mon.locked.is_set()
-    assert mon._empty == C.SAFETY_EMPTY_READS - 1
-    # a real echo clears the streak
+    assert mon._empty == 8
+    clock.advance(0.9)
+    mon._tick()
+    assert not mon.locked.is_set()
+    clock.advance(0.1)
+    mon._tick()
+    assert_halted(mon, hw.dog)
+    assert mon.reason.startswith("distance_empty")
+    assert "empty=" in mon.reason
+    # a real echo, after a reset, clears the window
+    mon.reset("test")
+    mon.walking.set()
+    hw.dog.distance.set(None)
+    mon._tick()
+    clock.advance(0.4)
     hw.dog.distance.set(80)
     mon._tick()
     assert mon._empty == 0
-    hw.dog.distance.set(None)
-    for _ in range(C.SAFETY_EMPTY_READS - 1):
-        mon._tick()
+    assert mon._empty_since is None
     assert not mon.locked.is_set()
+
+
+def test_obstacle_is_instant_during_an_empty_window(make_hw, monkeypatch):
+    clock = sim.ManualClock(50.0)
+    monkeypatch.setattr("safety.time.time", clock.time)
+    hw = make_hw()
+    mon = _monitor(hw)
+    mon.walking.set()
+    hw.dog.distance.set(None)
+    mon._tick()
+    clock.advance(0.2)
+    hw.dog.distance.set(15)
     mon._tick()
     assert_halted(mon, hw.dog)
-    assert mon.reason == "distance_empty"
+    assert mon.reason == "obstacle 15cm"
+
+
+def test_empty_window_follows_the_configured_seconds(make_hw, monkeypatch):
+    clock = sim.ManualClock(0.0)
+    monkeypatch.setattr("safety.time.time", clock.time)
+    monkeypatch.setattr(C, "SAFETY_EMPTY_SECONDS", 0.4)
+    hw = make_hw()
+    mon = _monitor(hw)
+    mon.walking.set()
+    hw.dog.distance.set(None)
+    mon._tick()
+    clock.advance(0.39)
+    mon._tick()
+    assert not mon.locked.is_set()
+    clock.advance(0.01)
+    mon._tick()
+    assert_halted(mon, hw.dog)
+    assert mon.reason.startswith("distance_empty empty=")
+
+
+def test_empty_seconds_env(tmp_path):
+    proc = run_py(
+        """
+        import os, importlib
+        os.environ.pop("PIDOG_REX_EMPTY_SECONDS", None)
+        os.environ.pop("REX_EMPTY_SECONDS", None)
+        import config
+        importlib.reload(config)
+        assert config.SAFETY_EMPTY_SECONDS == 1.0, config.SAFETY_EMPTY_SECONDS
+        os.environ["REX_EMPTY_SECONDS"] = "2.5"
+        importlib.reload(config)
+        assert config.SAFETY_EMPTY_SECONDS == 2.5
+        os.environ["PIDOG_REX_EMPTY_SECONDS"] = ""
+        importlib.reload(config)
+        assert config.SAFETY_EMPTY_SECONDS == 2.5  # blank PIDOG_ falls through to REX_
+        os.environ["PIDOG_REX_EMPTY_SECONDS"] = "1.4"
+        importlib.reload(config)
+        assert config.SAFETY_EMPTY_SECONDS == 1.4
+        os.environ["PIDOG_REX_EMPTY_SECONDS"] = "0.01"
+        importlib.reload(config)
+        assert config.SAFETY_EMPTY_SECONDS == 0.2
+        os.environ["PIDOG_REX_EMPTY_SECONDS"] = "nope"
+        importlib.reload(config)
+        assert config.SAFETY_EMPTY_SECONDS == 1.0
+        print("empty-seconds-ok")
+        """,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "empty-seconds-ok" in proc.stdout
 
 
 def test_empty_distance_while_idle_does_not_count(make_hw):
