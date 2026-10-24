@@ -66,11 +66,13 @@ def run(args) -> int:
     from locomotion import Locomotion
     tts = not args.no_tts
     hw = Hardware()
+    if getattr(args, "allow_no_imu", False):
+        hw.note_stale_override()
     # Install handlers only AFTER Pidog() forks its sensory child, so the child keeps
     # default SIGTERM and actually dies when Pidog.close() terminates it.
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
-    safety = SafetyMonitor(hw)
+    safety = SafetyMonitor(hw, allow_no_imu=bool(getattr(args, "allow_no_imu", False)))
     loco = Locomotion(hw, safety)
     listener = audio.Listener()
     listener.on_stop = lambda: safety.trip("voice_stop")
@@ -221,7 +223,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sim", action="store_true", help="simulated dog and camera (no Pi). Same as REX_SIM=1")
     p.add_argument("--allow-voice-patrol", action="store_true", help="let the voice command 'rex patrol' enable walking")
     p.add_argument("--seconds", type=float, default=None, help="run N seconds then lie down and exit")
-    p.add_argument("--allow-no-imu", action="store_true", help="permit patrol even if the IMU failed to init (no tilt stop)")
+    p.add_argument("--allow-no-imu", action="store_true",
+                   help="permit patrol even if the IMU failed to init or is frozen (no tilt stop)")
     p.add_argument("--no-tts", action="store_true")
     p.add_argument("--no-listen", action="store_true")
     p.add_argument("--force-first-grok", action="store_true", help="make the first frame call Grok (testing)")

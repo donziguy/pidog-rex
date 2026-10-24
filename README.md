@@ -74,8 +74,10 @@ GitHub Actions runs it on Python 3.11.
 ## Safety
 - SafetyMonitor thread polls ~10 Hz, independent of the main loop. It trips on: obstacle < 25 cm or
   repeated empty ultrasonic reads while walking, tilt > 30 deg from the pose at startup, repeated IMU
-  read failures, battery < 6.6 V for 3 s, head touch while walking, or the voice command "stop". A trip
-  clears the leg queue, lies down, and locks out movement until restart or "rex patrol".
+  read failures, a frozen IMU that repeats the same raw acceleration (`imu_stale`), battery < 6.6 V
+  for 3 s, head touch while walking, or the voice command "stop". A trip clears the leg queue, lies
+  down, and locks out movement until restart or "rex patrol". `--allow-no-imu` does not disable those
+  stops for a live chip. It only skips the frozen-chip trip (see below).
 - Tilt is the angle between the current raw accelerometer vector and a baseline averaged at startup.
   pidog's own pitch/roll are not used: its calibration forces the boot pose to `ax=-16384`, which is
   wrong when gravity is on Y/Z, and a real tilt then stays under 30 deg. `python3 sensorcheck.py --imu`
@@ -87,13 +89,20 @@ GitHub Actions runs it on Python 3.11.
   not logged.
 - SIGTERM: stop legs, lie down, close hardware cleanly.
 
-## Known issue: IMU init failure
+## Known issue: IMU init failure and a frozen chip
 If the SH3001 fails to init (`imu_sh3001 init ... fail`), there is no tilt signal and `--patrol` refuses
 to walk. That is separate from a mounted-but-miscalibrated IMU, which Rex handles itself (see Safety).
 
-**`--allow-no-imu` warning:** this overrides that refusal and walks with NO tilt/fall detection. Only use
-it while you are right next to the dog, on a clear floor, ready to grab it. Fix the IMU (reseat cable,
-run SunFounder calibration) instead when you can.
+A chip can also init and then stick: the same accel and gyro frame forever, even while the dog is
+moved. Tilt then looks valid and never changes. Rex calls that `imu_stale`. Without `--allow-no-imu`
+it trips `imu_read_fail` and refuses patrol and follow. `python3 sensorcheck.py --imu` prints
+`stale=True/False`.
+
+**`--allow-no-imu` warning:** supervised bypass while the gyro board is being replaced. It overrides
+the refusal for a missing IMU and for a frozen one. Rex logs `imu_stale_overridden` once and walks
+with NO tilt/fall detection (the stuck angle is ignored). Distance, battery, and touch stops still
+run. Only use it while you are right next to the dog, on a clear floor, ready to grab it. Fix the IMU
+(reseat the cable, run SunFounder calibration, or replace the board) instead when you can.
 
 ## Face recognition
 
@@ -183,7 +192,7 @@ After `REX_FOLLOW_LOST_TICKS` misses in a row (default 5) the session ends. Each
 through the locomotion safety thread
 (distance, tilt, battery, touch). The session stops at `REX_FOLLOW_MAX_STEPS` (default 8) or
 `REX_FOLLOW_MAX_SECONDS` (default 60), then he sits. Speed is `REX_FOLLOW_SPEED` (default 50,
-and never above the patrol speed). An armed guard still refuses to walk. A dead IMU refuses
+and never above the patrol speed). An armed guard still refuses to walk. A dead or frozen IMU refuses
 follow unless you also passed `--allow-no-imu`, which is the same "stand next to the dog"
 warning as patrol.
 
@@ -229,8 +238,9 @@ The page shows the latest camera frame, battery, tilt, distance, shelf/patrol mo
 line, and a tail of the log. Buttons: speak a line, move the head, shelf mode, and a large STOP
 that trips the safety monitor immediately (legs stop, lie down, lock). Patrol from the page also
 requires `REX_DASH_ALLOW_PATROL=1`. Enabling it still goes through `Locomotion.enable` (IMU must
-be up, unless you started Rex with `--allow-no-imu`) and the safety thread still enforces distance,
-tilt, battery, and touch. STOP does not need the patrol flag.
+be up and not frozen, unless you started Rex with `--allow-no-imu`) and the safety thread still
+enforces distance, tilt, battery, and touch. With the override, tilt from a frozen chip is ignored.
+STOP does not need the patrol flag.
 
 ```bash
 pip install flask

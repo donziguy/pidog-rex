@@ -310,6 +310,7 @@ class Hardware:
         self.tilt_deg = 0.0
         self.imu_fail_streak = 0
         self.imu_stale = False
+        self._stale_override_logged = False
         self.tilt_baseline = None
         if self.imu_ok:
             # The dog is still in the boot lie pose. Average a handful of raw
@@ -358,6 +359,17 @@ class Hardware:
         self.imu_fail_streak = self._tilt.fail_streak
         self.imu_stale = self._tilt.stale
         return pitch, roll
+
+    def note_stale_override(self) -> None:
+        """Log once when ``--allow-no-imu`` is letting a frozen chip through.
+
+        Called at startup if the baseline was already stuck, and again from the
+        safety thread if the chip freezes later. The second call is a no-op.
+        """
+        if self._stale_override_logged or not self.imu_stale:
+            return
+        self._stale_override_logged = True
+        log("imu_stale_overridden")
 
     def battery(self) -> float | None:
         try:

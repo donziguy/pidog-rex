@@ -104,6 +104,26 @@ def test_flags_default_off_and_shelf_mode_does_not_walk(make_hw, monkeypatch, ca
     assert "FATAL" not in out
 
 
+def test_frozen_imu_patrol_needs_allow_no_imu(monkeypatch, capsys):
+    _fast(monkeypatch)
+    sim.configure(imu_frozen_check=True)
+    assert main.run(_args(patrol=True, allow_no_imu=False)) == 0
+    refused = capsys.readouterr().out
+    assert "patrol_refused imu_stale" in refused
+    assert "imu_stale_overridden" not in refused
+    assert not any(action["action"] in _WALK for action in sim.dogs[-1].action_log)
+
+    main._shutdown.clear()
+    sim.reset()
+    sim.configure(imu_frozen_check=True)
+    assert main.run(_args(patrol=True, allow_no_imu=True)) == 0
+    allowed = capsys.readouterr().out
+    assert "imu_stale_overridden" in allowed
+    assert "patrol_enabled" in allowed
+    assert "reason=imu_read_fail" not in allowed
+    assert any(action["action"] == "forward" for action in sim.dogs[-1].action_log)
+
+
 def test_allow_no_imu_is_wired_through_run(monkeypatch, capsys):
     _fast(monkeypatch)
     sim.configure(imu=False)

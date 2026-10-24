@@ -65,6 +65,10 @@ class Locomotion:
     allow_no_imu = False
 
     def enable(self, why: str) -> bool:
+        stale = bool(getattr(self.hw, "imu_stale", False))
+        if stale and not self.allow_no_imu:
+            log("patrol_refused imu_stale (frozen IMU; tilt safety would be blind); use --allow-no-imu to override")
+            return False
         if not self.hw.imu_ok and not self.allow_no_imu:
             log("patrol_refused imu_unavailable (tilt safety would be blind); use --allow-no-imu to override")
             return False

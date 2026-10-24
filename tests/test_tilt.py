@@ -397,3 +397,107 @@ def test_sensorcheck_imu_prints_stale_flag(monkeypatch, capsys):
     _run("False")
     sim.configure(imu_frozen_check=True)
     _run("True")
+
+
+def _walk_session(hw, mon, allow):
+    import argparse
+
+    import main
+    from locomotion import Locomotion
+
+    loco = Locomotion(hw, mon)
+    loco.allow_no_imu = allow
+    args = argparse.Namespace(allow_no_imu=allow, patrol=False, follow=False, allow_voice_patrol=False)
+    return main.Session(hw, mon, loco, listener=None, tts=False, args=args), loco
+
+
+def test_stale_without_override_trips_and_refuses_patrol_and_follow(make_hw, capsys):
+    import follow as follow_mod
+
+    sim.configure(imu_frozen_check=True)
+    hw = make_hw()
+    mon = SafetyMonitor(hw, allow_no_imu=False)
+    session, loco = _walk_session(hw, mon, False)
+    assert loco.enable("patrol") is False
+    assert loco.enabled is False
+    assert follow_mod.Follow(session).start() is False
+    for _ in range(C.SAFETY_EMPTY_READS):
+        mon._tick()
+    text = capsys.readouterr().out
+    assert "patrol_refused imu_stale" in text
+    assert "follow_refused imu_stale" in text
+    assert "imu_stale_overridden" not in text
+    assert_halted(mon, hw.dog)
+    assert mon.reason == "imu_read_fail"
+
+
+def test_allow_no_imu_lets_a_frozen_chip_walk(make_hw, capsys):
+    import follow as follow_mod
+
+    sim.configure(imu_frozen_check=True)
+    hw = make_hw()
+    assert hw.imu_stale is True
+    hw.note_stale_override()
+    mon = SafetyMonitor(hw, allow_no_imu=True)
+    session, loco = _walk_session(hw, mon, True)
+    assert loco.enable("override") is True
+    assert follow_mod.Follow(session).start() is True
+    for _ in range(C.SAFETY_EMPTY_READS + 5):
+        mon._tick()
+        assert not mon.locked.is_set()
+    text = capsys.readouterr().out
+    assert len(_logged(text, "imu_stale_overridden")) == 1
+    mon._tick()
+    assert _logged(capsys.readouterr().out, "imu_stale_overridden") == []
+    mon.walking.set()
+    hw.dog.distance.set(10)
+    mon._tick()
+    assert mon.reason.startswith("obstacle")
+
+
+def test_allow_no_imu_logs_once_when_the_chip_freezes_later(make_hw, capsys):
+    mount = _MOUNTS["x"]
+    frozen = (mount[0] + 50.0, mount[1], mount[2])
+    seen = {"n": 0}
+
+    def script():
+        seen["n"] += 1
+        if seen["n"] <= 10:
+            return (mount[0] + seen["n"], mount[1], mount[2])
+        return frozen
+
+    hw = _scripted_dog(make_hw, script, mount)
+    assert hw.imu_stale is False
+    hw.note_stale_override()
+    capsys.readouterr()
+    mon = SafetyMonitor(hw, allow_no_imu=True)
+    for _ in range(IMU_STALE_READS - 1):
+        mon._tick()
+        assert not mon.locked.is_set()
+    assert hw.imu_stale is False
+    mon._tick()
+    assert hw.imu_stale is True
+    assert not mon.locked.is_set()
+    assert mon.reason == ""
+    assert len(_logged(capsys.readouterr().out, "imu_stale_overridden")) == 1
+    for _ in range(5):
+        mon._tick()
+    assert not mon.locked.is_set()
+    assert _logged(capsys.readouterr().out, "imu_stale_overridden") == []
+
+
+def test_allow_no_imu_still_trips_a_live_tilt(make_hw, capsys):
+    hw = make_hw()
+    hw.dog.pitch = 35
+    mon = SafetyMonitor(hw, allow_no_imu=True)
+    mon._tick()
+    assert_halted(mon, hw.dog)
+    assert mon.reason.startswith("tilt ")
+    assert "imu_stale_overridden" not in capsys.readouterr().out
+
+
+def test_allow_no_imu_help_mentions_a_frozen_imu():
+    import main
+    text = main.build_parser().format_help()
+    assert "--allow-no-imu" in text
+    assert "frozen" in text
