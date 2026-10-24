@@ -92,6 +92,10 @@ def test_status_snapshot_and_log(make_hw, monkeypatch):
     assert status["mode"] == "shelf"
     assert status["last_grok"] == "the shelf is a disgrace"
     assert status["allow_patrol"] is False
+    assert status["imu_ok"] is True
+    assert status["imu_stale"] is False
+    hw.imu_stale = True
+    assert client.get("/api/status", headers=_auth()).get_json()["imu_stale"] is True
     snap = client.get("/api/snapshot", headers=_auth())
     assert snap.mimetype == "image/jpeg"
     with Image.open(__import__("io").BytesIO(snap.data)) as im:

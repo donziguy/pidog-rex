@@ -19,7 +19,11 @@ def main(argv=None) -> None:
             print(f"IMU baseline={None if b is None else tuple(round(x, 1) for x in b)} imu_ok={h.imu_ok}", flush=True)
             while True:
                 pitch, roll = h.tilt()
-                print(f"tilt={h.tilt_deg:.1f} pitch={pitch:.1f} roll={roll:.1f} fail={h.imu_fail_streak}", flush=True)
+                print(
+                    f"tilt={h.tilt_deg:.1f} pitch={pitch:.1f} roll={roll:.1f} "
+                    f"fail={h.imu_fail_streak} stale={h.imu_stale}",
+                    flush=True,
+                )
                 time.sleep(0.2)
         else:
             time.sleep(1.5)

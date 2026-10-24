@@ -25,7 +25,11 @@ dogs: list = []
 
 def configure(**kwargs) -> None:
     """Overrides for the next dogs: ``imu`` (bool), ``clock``, ``step_seconds``,
-    ``imu_mount`` (raw accel at rest), ``realistic_legs`` (pidog's per-frame buffer)."""
+    ``imu_mount`` (raw accel at rest), ``realistic_legs`` (pidog's per-frame buffer).
+    ``imu_frozen_check`` (default False) opts the sim dog into the frozen-IMU
+    detector; a scripted still dog repeats one vector, so the check stays off
+    unless a test is feeding that case. ``imu_script`` is a callable installed
+    as the raw-accel source before the baseline window."""
     _pending.update(kwargs)
 
 
@@ -264,6 +268,13 @@ class SimDog:
         mount = cfg.get("imu_mount", (-16384.0, 0.0, 0.0))
         self.imu_mount = (float(mount[0]), float(mount[1]), float(mount[2]))
         self.imu_read_ok = True
+        # A scripted dog repeats one accel frame while it sits still. The
+        # frozen-IMU detector would treat that as a dead chip, so sim is
+        # exempt unless a test opts in.
+        self.imu_frozen_check = bool(cfg.get("imu_frozen_check", False))
+        script = cfg.get("imu_script")
+        if callable(script):
+            self.imu_raw.set_fn(script)
         self.imu = self  # pidog exposes Sh3001 as dog.imu
         self.realistic_legs = bool(cfg.get("realistic_legs", False))
         self._frame_total = 0

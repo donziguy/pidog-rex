@@ -6,8 +6,10 @@ Triggers (any one):
   * body tilt > SAFETY_TILT_DEG (any time). Tilt is the angle between the
     current raw acceleration and the vector captured at startup, not pidog's
     pitch/roll (those assume gravity is on the accelerometer X axis).
-  * N consecutive IMU read failures (any time). A single miss keeps the last
-    good sample; the streak matches SAFETY_EMPTY_READS.
+  * N consecutive IMU read failures (any time), including a frozen chip whose
+    raw accel repeats (imu_stale). A single miss keeps the last good sample;
+    the streak matches SAFETY_EMPTY_READS. The trip reason stays imu_read_fail,
+    so patrol and follow stop the same way they do for a dead read.
   * battery below SAFETY_BATTERY_LOW_V for ~3 s (any time)
   * head touch while walking (in shelf mode touch is just a pet)
   * external trip() e.g. the "stop" voice command
