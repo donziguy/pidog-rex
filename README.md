@@ -32,6 +32,45 @@ python3 main.py --patrol --seconds 120   # SUPERVISED patrol (legs move). Stay w
 Other flags: `--no-tts`, `--no-listen`, `--force-first-grok`, `--allow-voice-patrol` (lets "rex patrol" start walking).
 Voice: "stop" / "freeze" (safety stop), "patrol", "sit" / "rest", "good boy".
 
+## Simulation and tests
+
+Rex runs without a Pi. `REX_SIM=1` or `--sim` uses a software dog — legs, head, distance, IMU,
+battery, touch, sound direction, chest LEDs, and camera frames — instead of `pidog` and `picamera2`.
+Those imports happen only on the real path, so a laptop does not need the SunFounder stack. On the
+Pi, leave `REX_SIM` unset and do not pass `--sim`.
+
+```bash
+REX_SIM=1 python3 main.py --seconds 10 --no-tts --no-listen
+python3 main.py --sim --patrol --seconds 20 --no-tts --no-listen
+```
+
+`--sim` is for development. Do not add it, or `--patrol`, to `rex.service`. `sensorcheck.py` follows
+the same switch.
+
+Tests and a REPL can script sensors over time (each value holds until the next timestamp):
+
+```python
+import os
+os.environ["REX_SIM"] = "1"
+from hardware import Hardware
+hw = Hardware()
+hw.dog.distance.script([(0, 100), (1.5, 15)])  # clear, then 15 cm
+hw.dog.battery.script([(0, 7.4), (2.0, 6.2)])  # pack sags
+hw.dog.pitch = 0
+hw.dog.touch.set("N")
+```
+
+### Tests
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite stubs Grok, Ollama, and TTS/STT subprocesses. It does not use the network or a PiDog.
+GitHub Actions runs it on Python 3.11.
+
 ## Safety
 - SafetyMonitor thread polls ~10 Hz, independent of the main loop. It trips on: obstacle < 25 cm or
   repeated empty ultrasonic reads while walking, tilt > 30 deg, battery < 6.6 V for 3 s, head touch while
@@ -54,8 +93,9 @@ run SunFounder calibration) instead when you can.
 
 ## Layout
 `config.py` settings/logging, `brain.py` personality/mood/memory, `hardware.py` PiDog + camera,
-`safety.py` SafetyMonitor, `locomotion.py` patrol, `vision_grok.py` Grok vision, `audio.py` TTS/SFX/voice,
-`main.py` entry point, `sensorcheck.py` read-only sensor check.
+`sim.py` simulated dog (`REX_SIM` / `--sim` only; not imported on the Pi), `safety.py` SafetyMonitor,
+`locomotion.py` patrol, `vision_grok.py` Grok vision, `audio.py` TTS/SFX/voice, `main.py` entry point,
+`sensorcheck.py` read-only sensor check, `tests/` pytest suite.
 
 ## License
 MIT
