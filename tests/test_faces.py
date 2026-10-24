@@ -70,6 +70,8 @@ def test_pillow_matches_the_same_face_and_ignores_a_different_one(tmp_path, monk
 
 def test_detector_marks_unknowns_as_strangers_and_greets_cory(make_hw, monkeypatch, capsys):
     faces.reset_state()
+    # A fresh boot has a small monotonic clock. The cooldown must not treat 0 as "just greeted".
+    monkeypatch.setattr(faces.time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(C, "FACE_ENABLED", True)
     monkeypatch.setattr(C, "FACE_GREET_COOLDOWN", 1000)
     monkeypatch.setattr(C, "FACE_STRANGER_COOLDOWN", 1000)
@@ -203,6 +205,7 @@ def test_dlib_backend_reports_normalized_boxes(monkeypatch):
 
 def test_run_greets_cory_from_a_sim_sighting_and_stays_put(monkeypatch, capsys):
     faces.reset_state()
+    monkeypatch.setattr(faces.time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(C, "FACE_ENABLED", True)
     monkeypatch.setattr(C, "FACE_GREET_COOLDOWN", 1000)
     monkeypatch.setattr(C, "PRIMARY_HUMAN", "Cory")

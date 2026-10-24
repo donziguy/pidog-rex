@@ -26,14 +26,16 @@ from pathlib import Path
 import config as C
 from config import log
 
-_last_greet = 0.0
-_last_stranger = 0.0
+# None means "never". Zero is not safe: time.monotonic() is small on a fresh boot,
+# so a 0 baseline looks like the cooldown is still running.
+_last_greet = None
+_last_stranger = None
 
 
 def reset_state() -> None:
     global _last_greet, _last_stranger
-    _last_greet = 0.0
-    _last_stranger = 0.0
+    _last_greet = None
+    _last_stranger = None
 
 
 class FaceHit:
@@ -423,7 +425,7 @@ def _greet(session, name: str) -> None:
     import brain
     now = time.monotonic()
     brain.remember("seen", name)
-    if now - _last_greet < C.FACE_GREET_COOLDOWN:
+    if _last_greet is not None and now - _last_greet < C.FACE_GREET_COOLDOWN:
         return
     _last_greet = now
     audio.speak(f"Hello {name}.", bool(session.tts))
@@ -449,7 +451,7 @@ def _note_stranger(session) -> None:
     now = time.monotonic()
     brain.remember("stranger", "unknown face")
     brain.adjust_mood(event="stranger")
-    if now - _last_stranger < C.FACE_STRANGER_COOLDOWN:
+    if _last_stranger is not None and now - _last_stranger < C.FACE_STRANGER_COOLDOWN:
         return
     _last_stranger = now
     audio.speak("I don't know you. That's suspicious.", bool(session.tts))
