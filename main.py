@@ -4,6 +4,7 @@
   python3 main.py                 # shelf mode (head, camera, voice) forever
   python3 main.py --seconds 30    # shelf mode for 30 s then lie down and exit
   python3 main.py --patrol        # supervised patrol (legs!) - see README
+  python3 main.py --sim --seconds 10   # same loop on a simulated dog (no Pi)
 """
 from __future__ import annotations
 import argparse, fcntl, os, signal, sys, threading, time, traceback
@@ -43,6 +44,8 @@ def gesture(hw, name, tts):
 
 
 def run(args) -> int:
+    if getattr(args, "sim", False):
+        os.environ["REX_SIM"] = "1"
     from hardware import Hardware
     from safety import SafetyMonitor
     from locomotion import Locomotion
@@ -138,16 +141,21 @@ def run(args) -> int:
         hw.shutdown()
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Rex v2 PiDog")
     p.add_argument("--patrol", action="store_true", help="enable walking (supervised). Off by default.")
+    p.add_argument("--sim", action="store_true", help="simulated dog and camera (no Pi). Same as REX_SIM=1")
     p.add_argument("--allow-voice-patrol", action="store_true", help="let the voice command 'rex patrol' enable walking")
     p.add_argument("--seconds", type=float, default=None, help="run N seconds then lie down and exit")
     p.add_argument("--allow-no-imu", action="store_true", help="permit patrol even if the IMU failed to init (no tilt stop)")
     p.add_argument("--no-tts", action="store_true")
     p.add_argument("--no-listen", action="store_true")
     p.add_argument("--force-first-grok", action="store_true", help="make the first frame call Grok (testing)")
-    args = p.parse_args()
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
     lock = single_instance()
     log(f"rex_v2_start pid={os.getpid()} args={vars(args)}")
     rc = run(args)
