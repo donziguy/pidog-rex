@@ -4,6 +4,7 @@ import math, queue, shutil, struct, subprocess, sys, threading, time, wave
 from pathlib import Path
 import config as C
 from config import log
+import abort
 import brain
 
 speaking = threading.Event()
@@ -14,10 +15,57 @@ muted = False  # Home Assistant mute switch. Default off.
 command_filter = None
 
 
+def _feed_stdin(proc, text: str) -> None:
+    """Hand piper the phrase, then close so it sees EOF. Never block the kill path."""
+    try:
+        if proc.stdin is None:
+            return
+        proc.stdin.write(text if text.endswith("\n") else text + "\n")
+        proc.stdin.close()
+    except Exception:
+        pass
+
+
+def _run_tts(cmd, timeout: float, input_text: str | None = None, **kwargs) -> None:
+    """Run a TTS command, but kill it as soon as shutdown is requested."""
+    if abort.requested():
+        log("tts_abandoned")
+        return
+    proc = subprocess.Popen(cmd, **kwargs)
+    abort.track_tts(proc)
+    if input_text is not None:
+        threading.Thread(target=_feed_stdin, args=(proc, input_text), name="tts-stdin", daemon=True).start()
+    try:
+        deadline = time.monotonic() + timeout
+        while proc.poll() is None:
+            if abort.requested():
+                proc.kill()
+                log("tts_abandoned")
+                return
+            if time.monotonic() >= deadline:
+                proc.kill()
+                log("tts_timeout")
+                return
+            time.sleep(0.05)
+        # The signal handler may have killed the process between polls.
+        if abort.requested():
+            log("tts_abandoned")
+    finally:
+        abort.track_tts(None)
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except Exception:
+            pass
+
+
 def speak(text: str, enabled: bool = True) -> None:
     global _last_tts_end
     text = (text or "").strip()
     if not text:
+        return
+    if abort.requested():
+        log("tts_abandoned")
         return
     if muted:
         log("TTS suppressed (muted)")
@@ -31,11 +79,13 @@ def speak(text: str, enabled: bool = True) -> None:
         piper = shutil.which("piper") or str(Path.home() / ".local/bin/piper")
         if model.exists() and Path(piper).exists():
             wav = "/tmp/rex_voice.wav"
-            subprocess.run([piper, "--model", str(model), "--output_file", wav], input=text, text=True,
-                           check=False, timeout=30, capture_output=True)
-            subprocess.run(["aplay", "-q", wav], check=False, timeout=30)
+            _run_tts([piper, "--model", str(model), "--output_file", wav], 30, input_text=text,
+                     stdin=subprocess.PIPE, text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if not abort.requested() and Path(wav).exists():
+                _run_tts(["aplay", "-q", wav], 30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            subprocess.run(["espeak", "-s", "142", "-p", "32", text], check=False, timeout=25, capture_output=True)
+            _run_tts(["espeak", "-s", "142", "-p", "32", text], 25,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as exc:
         log(f"tts_error={type(exc).__name__}")
     finally:

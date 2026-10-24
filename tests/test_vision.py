@@ -182,6 +182,39 @@ def test_api_errors_do_not_escape(tmp_path, monkeypatch):
     }
 
 
+def test_grok_returns_when_shutdown_is_requested(tmp_path, monkeypatch, capsys):
+    """An in-flight Grok call must not sit on the socket timeout after Ctrl+C."""
+    import threading
+    import time
+
+    import abort
+
+    monkeypatch.setenv("XAI_API_KEY", "test-not-a-real-key")
+    started = threading.Event()
+
+    def post(url, **kwargs):
+        started.set()
+        # Stay blocked. The caller has to abandon this thread, not wait for it.
+        time.sleep(30)
+        return _resp(200, {"choices": [{"message": {"content": "{}"}}]})
+
+    monkeypatch.setattr("requests.post", post)
+
+    def trip():
+        assert started.wait(2)
+        abort.event.set()
+
+    threading.Thread(target=trip, daemon=True).start()
+    t0 = time.monotonic()
+    result = vision_grok.analyze(_solid(tmp_path / "frame.png", 40), force=True)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2
+    assert result["skipped"] is True
+    assert result["reason"] == "shutdown"
+    assert vision_grok._fail_streak == 0
+    assert "grok_abandoned" in capsys.readouterr().out
+
+
 def test_personality_text_is_unchanged():
     assert brain.PERSONALITY.startswith("You are Rex, a grumpy 15-year veteran security dog.")
     assert "Do not mention being an AI." in brain.PERSONALITY

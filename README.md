@@ -72,22 +72,30 @@ The suite stubs Grok, Ollama, and TTS/STT subprocesses. It does not use the netw
 GitHub Actions runs it on Python 3.11.
 
 ## Safety
-- SafetyMonitor thread polls ~10 Hz, independent of the main loop. It trips on: obstacle < 25 cm or
-  repeated empty ultrasonic reads while walking, tilt > 30 deg from the pose at startup, repeated IMU
-  read failures, a frozen IMU that repeats the same raw acceleration (`imu_stale`), battery < 6.6 V
-  for 3 s, head touch while walking, or the voice command "stop". A trip clears the leg queue, lies
-  down, and locks out movement until restart or "rex patrol". `--allow-no-imu` does not disable those
-  stops for a live chip. It only skips the frozen-chip trip (see below).
+- SafetyMonitor thread polls ~10 Hz, independent of the main loop. It trips on: obstacle < 25 cm
+  (instant, on any valid echo) or about 1 s with no valid ultrasonic reading while walking
+  (`PIDOG_REX_EMPTY_SECONDS`, or `REX_EMPTY_SECONDS` when that is unset; floor 0.2 s). The trip line
+  includes how many reads were empty. A brief `None` from gait vibration does not trip. Tilt > 30 deg
+  from the pose at startup, repeated IMU read failures, a frozen IMU that repeats the same raw
+  acceleration (`imu_stale`), battery < 6.6 V for 3 s, head touch while walking, or the voice command
+  "stop" also trip. A trip clears the leg queue, lies down, and locks out movement until restart or
+  "rex patrol". `--allow-no-imu` does not disable those stops for a live chip. It only skips the
+  frozen-chip trip (see below).
 - Tilt is the angle between the current raw accelerometer vector and a baseline averaged at startup.
   pidog's own pitch/roll are not used: its calibration forces the boot pose to `ax=-16384`, which is
   wrong when gravity is on Y/Z, and a real tilt then stays under 30 deg. `python3 sensorcheck.py --imu`
   prints the live angle for a hand test.
-- Walking defaults: speed 65, 1-2 steps per move, halts on missing distance readings, 120 s patrol cap
-  then rest.
+- Walking defaults: speed 65, 1-2 steps per move, 120 s patrol cap then rest. Before a step Rex takes
+  up to 5 distance reads about 60 ms apart and uses the median of the valid ones, so one empty echo
+  does not halt the patrol. No valid echo in that sample still trips, and the trip line includes the
+  empty count. The head is leveled for the step: the shelf pitch (18, with pitch_comp -15) is slightly
+  up at yaw 0 and nose-down at the look-around yaw of ±35, which points the ultrasonic at the floor.
 - Grok is called only on a real scene change (32x24 grayscale thumbnail diff), at least 60 s apart, with
   320 px images, retries with backoff, Ollama fallback. API failures never crash the loop; responses are
   not logged.
-- SIGTERM: stop legs, lie down, close hardware cleanly.
+- SIGINT and SIGTERM set the shutdown event, stop the legs immediately, and abandon an in-flight Grok
+  call or TTS instead of waiting out the HTTP or espeak timeout. A second Ctrl+C lies down, closes
+  the hardware, and exits. One Pidog instance, same as a normal shutdown.
 
 ## Known issue: IMU init failure and a frozen chip
 If the SH3001 fails to init (`imu_sh3001 init ... fail`), there is no tilt signal and `--patrol` refuses

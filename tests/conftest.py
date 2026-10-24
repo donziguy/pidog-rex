@@ -7,6 +7,7 @@ restored: a child process with a temp HOME still needs the real user site
 """
 from __future__ import annotations
 
+import io
 import os
 import signal
 import site
@@ -76,12 +77,16 @@ def isolate(tmp_path, monkeypatch):
     except Exception:
         pass
     main._shutdown.clear()
+    main._sig_count = 0
+    main._bits.update(hw=None, loco=None, in_shutdown=False)
     prev_int = signal.getsignal(signal.SIGINT)
     prev_term = signal.getsignal(signal.SIGTERM)
     yield
     signal.signal(signal.SIGINT, prev_int)
     signal.signal(signal.SIGTERM, prev_term)
     main._shutdown.clear()
+    main._sig_count = 0
+    main._bits.update(hw=None, loco=None, in_shutdown=False)
     for thread in threading.enumerate():
         if thread.name in {"safety", "listener", "dashboard"} and thread is not threading.current_thread():
             stopper = getattr(thread, "stop", None)
@@ -130,13 +135,35 @@ def blocked_audio(monkeypatch):
             return real_run(cmd, *args, **kwargs)
         return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
 
+    class _DoneProc:
+        """Stand-in for espeak, piper, and aplay. ``poll`` is already finished."""
+
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
     def fake_popen(cmd, *args, **kwargs):
-        # subprocess.run() reaches Popen. Only the Vosk worker is stubbed.
+        # subprocess.run() reaches Popen. Python interpreters stay real so the
+        # suite can still launch Rex. TTS/aplay must not spawn; speak() polls
+        # this stand-in and returns at once.
         blob = " ".join(str(part) for part in _argv(cmd))
         if "KaldiRecognizer" in blob or "vosk" in blob:
             calls.append(cmd)
             raise RuntimeError("STT subprocess disabled in tests")
-        return real_popen(cmd, *args, **kwargs)
+        head = Path(str(_argv(cmd)[0])).name if _argv(cmd) else ""
+        if head.startswith("python"):
+            return real_popen(cmd, *args, **kwargs)
+        calls.append(cmd)
+        return _DoneProc()
 
     monkeypatch.setattr(audio.subprocess, "run", fake_run)
     monkeypatch.setattr(audio.subprocess, "Popen", fake_popen)

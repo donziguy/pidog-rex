@@ -8,7 +8,13 @@ from __future__ import annotations
 import time
 import config as C
 from config import log
+import abort
 import brain
+
+# Before a step, take several echoes. Gait vibration and a nose-down head
+# return None for a sample or two; one miss must not cancel the walk.
+DISTANCE_SAMPLES = 5
+DISTANCE_SAMPLE_GAP = 0.06
 
 # pidog Walk: 8 sections * 6 steps, plus the closing pose that returns to the
 # origin. do_action queues that many angle groups per step. robot_hat 2.3.5
@@ -42,6 +48,35 @@ def leg_wait_budget(speed: float, steps: int, queued: int) -> float:
     frames = max(1, int(queued))
     nominal = frames * servo_frame_seconds(speed) * 4.0 + 1.0
     return max(8.0 + 3.0 * max(1, int(steps)), nominal)
+
+
+def sample_distance(hw, samples: int = DISTANCE_SAMPLES, gap: float = DISTANCE_SAMPLE_GAP):
+    """Median of up to ``samples`` echoes, ``gap`` seconds apart.
+
+    Returns ``(median_or_None, empty_count)``. Invalid reads (None, outside
+    2-400 cm) count as empty and are left out of the median.
+    """
+    valid = []
+    empty = 0
+    for i in range(max(1, int(samples))):
+        if abort.requested():
+            break
+        reading = hw.distance()
+        if reading is None:
+            empty += 1
+        else:
+            valid.append(float(reading))
+        if i + 1 < samples:
+            time.sleep(gap)
+    if not valid:
+        return None, empty
+    valid.sort()
+    mid = len(valid) // 2
+    if len(valid) % 2:
+        median = valid[mid]
+    else:
+        median = (valid[mid - 1] + valid[mid]) / 2.0
+    return median, empty
 
 
 def leg_stall_seconds(speed: float) -> float:
@@ -110,13 +145,15 @@ class Locomotion:
         return move if ok else "aborted"
 
     def plan(self) -> tuple[str, int]:
-        self.hw.move_head(0, 0, None, speed=40)
-        reads = [d for d in (self.hw.distance() for _ in range(3)) if d is not None]
-        if not reads:
-            log("plan halt: no distance reading")
-            self.safety.trip("distance_empty_before_move")
+        # Level the ultrasonic before trusting a range. The shelf pitch aims
+        # slightly down once the head yaws, and the walk then rocks that aim
+        # into the floor.
+        self.hw.level_head(0, 0, speed=40)
+        c, empty = sample_distance(self.hw)
+        if c is None:
+            log(f"plan halt: no distance reading empty={empty}")
+            self.safety.trip(f"distance_empty_before_move empty={empty}")
             return "halt", 0
-        c = min(reads)
         if c >= C.OBSTACLE_CLEAR_CM:
             return "forward", C.WALK_MAX_STEPS
         if c >= C.OBSTACLE_TURN_CM:
@@ -136,11 +173,11 @@ class Locomotion:
     def _scan(self):
         out = []
         for yaw in (35, -35):
-            self.hw.move_head(yaw, 0, None, speed=50)
+            self.hw.level_head(yaw, 0, speed=50)
             time.sleep(0.25)
-            vals = [d for d in (self.hw.distance() for _ in range(3)) if d is not None]
-            out.append(min(vals) if vals else None)
-        self.hw.move_head(0, 0, None, speed=50)
+            reading, _empty = sample_distance(self.hw)
+            out.append(reading)
+        self.hw.level_head(0, 0, speed=50)
         return out[0], out[1]
 
     def _do(self, action: str, steps: int, speed: int, walking: bool) -> bool:
@@ -148,6 +185,10 @@ class Locomotion:
             return False
         dog = self.hw.dog
         log(f"walk action={action} steps={steps} speed={speed}")
+        if walking:
+            # Hold the ranger level for the step. Follow calls _do directly
+            # and never goes through plan().
+            self.hw.level_head(0, 0, speed=40)
         if walking and action != "backward":
             self.safety.walking.set()   # monitor enforces stop distance (not while backing away)
         try:
@@ -169,8 +210,8 @@ class Locomotion:
             last_len = _buffer_len(dog)
             last_change = time.time()
             while not dog.is_legs_done():
-                if not self.safety.allow_move():
-                    log("walk interrupted by safety")
+                if abort.requested() or not self.safety.allow_move():
+                    log("walk interrupted by shutdown" if abort.requested() else "walk interrupted by safety")
                     self.hw.legs_stop()
                     return False
                 now = time.time()
@@ -187,8 +228,8 @@ class Locomotion:
                 time.sleep(0.02)
             # A trip clears the leg buffer, which makes is_legs_done() true. That is
             # an abort, not a finished step — don't count it.
-            if not self.safety.allow_move():
-                log("walk interrupted by safety")
+            if abort.requested() or not self.safety.allow_move():
+                log("walk interrupted by shutdown" if abort.requested() else "walk interrupted by safety")
                 self.hw.legs_stop()
                 return False
             brain.bump("floor_moves")

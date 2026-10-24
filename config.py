@@ -124,7 +124,26 @@ SAFETY_POLL = 0.1
 SAFETY_STOP_CM = _f("PIDOG_REX_STOP_CM", 25)
 SAFETY_TILT_DEG = _f("PIDOG_REX_TILT_DEG", 30)
 SAFETY_BATTERY_LOW_V = _f("PIDOG_REX_BATTERY_LOW_V", 6.6)
-SAFETY_EMPTY_READS = _i("PIDOG_REX_EMPTY_READS", 3)  # consecutive empty ultrasonic reads while walking
+SAFETY_EMPTY_READS = _i("PIDOG_REX_EMPTY_READS", 3)  # consecutive IMU failures, and the old read-count name
+
+
+def _first_float(names, default):
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            continue
+        try:
+            return float(raw)
+        except ValueError:
+            return float(default)
+    return float(default)
+
+
+# How long the ultrasonic may return nothing while the legs are moving before
+# it counts as a dead sensor. A real obstacle (any valid read under the stop
+# distance) still trips on that single sample. PIDOG_REX_EMPTY_SECONDS wins
+# when both are set.
+SAFETY_EMPTY_SECONDS = max(0.2, _first_float(("PIDOG_REX_EMPTY_SECONDS", "REX_EMPTY_SECONDS"), 1.0))
 
 # Web dashboard. Off unless REX_DASH=1, and it refuses to listen without a token.
 DASH_ENABLED = _b("REX_DASH", False)

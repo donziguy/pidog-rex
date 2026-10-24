@@ -394,6 +394,27 @@ class Hardware:
         return None
 
     # ---- head / tail / chest --------------------------------------------
+    def level_pitch(self, yaw=0, roll=0) -> int:
+        """Pitch command that keeps the ultrasonic servo level.
+
+        pidog mixes the command into the servo as
+        ``pitch_servo = roll*|yaw|/90 + pitch*(1-|yaw|/90) + pitch_comp``.
+        The shelf pose (pitch 18, pitch_comp -15) is +3° at yaw 0, slightly up,
+        and about -4° at the look-around yaw of ±35, nose down toward the floor.
+        A nose-down head plus the walk gait is how the ranger loses the echo.
+        """
+        ratio = min(1.0, abs(float(yaw)) / 90.0)
+        scale = 1.0 - ratio
+        if scale < 1e-6:
+            pitch = 0.0
+        else:
+            pitch = (-float(C.HEAD_PITCH_COMP) - float(roll) * ratio) / scale
+        return int(max(-60, min(60, round(pitch))))
+
+    def level_head(self, yaw=0, roll=0, speed=40) -> None:
+        """Point the ultrasonic forward. Used before and during a step."""
+        self.move_head(yaw, roll, self.level_pitch(yaw, roll), speed=speed)
+
     def move_head(self, yaw=0, roll=0, pitch=None, speed=30, wait=True) -> None:
         pitch = C.HEAD_PITCH_DEFAULT if pitch is None else pitch
         yaw, roll, pitch = (int(max(-60, min(60, v))) for v in (yaw, roll, pitch))
@@ -506,10 +527,28 @@ class Hardware:
             except Exception as exc:
                 log(f"dog_close_error={exc}")
             done.set()
-        if threading.current_thread() is threading.main_thread():
-            _close()
-        else:
-            t = threading.Thread(target=_close, daemon=True); t.start(); done.wait(6)
+        # Pidog.close() installs its own SIGINT handler ("please wait") and can
+        # sit there. Put ours back while close runs so a second Ctrl+C still
+        # reaches the force-exit path. close() itself stays on this thread:
+        # the library's alarm only works on the main thread, and there is
+        # still only one Pidog.
+        import abort
+        stop_rehook = threading.Event()
+
+        def _rehook():
+            while not stop_rehook.wait(0.05):
+                abort.reinstall()
+
+        rehook = threading.Thread(target=_rehook, name="signal-rehook", daemon=True)
+        rehook.start()
+        try:
+            if threading.current_thread() is threading.main_thread():
+                _close()
+            else:
+                t = threading.Thread(target=_close, daemon=True); t.start(); done.wait(6)
+        finally:
+            stop_rehook.set()
+            rehook.join(timeout=1)
         sp = getattr(self.dog, "sensory_process", None)
         try:
             if sp is not None and sp.is_alive():
