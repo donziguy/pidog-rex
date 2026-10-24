@@ -13,8 +13,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config as C
 from config import log
 import brain, audio, vision_grok
+from dashboard import Dashboard
 
 _shutdown = threading.Event()
+
+
+class Session:
+    """Live objects the main loop shares with optional features."""
+
+    def __init__(self, hw, safety, loco, listener, tts, args):
+        self.hw = hw
+        self.safety = safety
+        self.loco = loco
+        self.listener = listener
+        self.tts = tts
+        self.args = args
+        self.face_hits = []
+        self.person_seen = "none"
 
 
 def _on_signal(signum, frame):
@@ -63,6 +78,10 @@ def run(args) -> int:
     safety.start()
     if not args.no_listen:
         listener.start()
+    session = Session(hw, safety, loco, listener, tts, args)
+    dash = Dashboard(session)
+    session.dash = dash
+    dash.start()
     brain.memory(); brain.set_state("online")
     deadline = time.time() + args.seconds if args.seconds else None
     grok_calls = 0
@@ -78,6 +97,7 @@ def run(args) -> int:
         positions = [(-35, "left"), (0, "center"), (35, "right")]
         i = 0
         while not _shutdown.is_set() and (deadline is None or time.time() < deadline):
+            dash.drain()
             # 1) voice commands
             while not listener.events.empty():
                 cmd, _text = listener.events.get_nowait()
@@ -136,6 +156,7 @@ def run(args) -> int:
         return 1
     finally:
         loco.disable("shutdown")
+        dash.stop()
         listener.stop(); safety.stop()
         brain.save()
         hw.shutdown()

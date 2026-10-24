@@ -95,11 +95,38 @@ to walk. That is separate from a mounted-but-miscalibrated IMU, which Rex handle
 it while you are right next to the dog, on a clear floor, ready to grab it. Fix the IMU (reseat cable,
 run SunFounder calibration) instead when you can.
 
+## Web dashboard
+
+Off unless `REX_DASH=1`. Rex then serves a small page (Flask) at `REX_DASH_HOST`:`REX_DASH_PORT`,
+default `0.0.0.0:8080`. It **refuses to listen** if `REX_DASH_TOKEN` is empty. Send the token as
+`X-Rex-Token`, `Authorization: Bearer …`, or `?token=` (the page keeps it in sessionStorage and
+never writes it to the log). The token is redacted if it would otherwise land in `rex.log`.
+
+The page shows the latest camera frame, battery, tilt, distance, shelf/patrol mode, the last Grok
+line, and a tail of the log. Buttons: speak a line, move the head, shelf mode, and a large STOP
+that trips the safety monitor immediately (legs stop, lie down, lock). Patrol from the page also
+requires `REX_DASH_ALLOW_PATROL=1`. Enabling it still goes through `Locomotion.enable` (IMU must
+be up, unless you started Rex with `--allow-no-imu`) and the safety thread still enforces distance,
+tilt, battery, and touch. STOP does not need the patrol flag.
+
+```bash
+pip install flask
+# in ~/.config/pidog/security_dog.env (chmod 600):
+#   REX_DASH=1
+#   REX_DASH_TOKEN=pick-a-long-random-string
+#   REX_DASH_ALLOW_PATROL=0
+REX_SIM=1 REX_DASH=1 REX_DASH_TOKEN=dev-only python3 main.py --sim --seconds 30 --no-tts --no-listen
+```
+
+Do not put the token in the repo, in `rex.service`, or in the shell history of a shared machine.
+Bind stays configurable; on a Pi that shares a LAN, prefer a token you would not reuse elsewhere.
+
 ## Layout
 `config.py` settings/logging, `brain.py` personality/mood/memory, `hardware.py` PiDog + camera,
 `sim.py` simulated dog (`REX_SIM` / `--sim` only; not imported on the Pi), `safety.py` SafetyMonitor,
-`locomotion.py` patrol, `vision_grok.py` Grok vision, `audio.py` TTS/SFX/voice, `main.py` entry point,
-`sensorcheck.py` read-only sensor check, `tests/` pytest suite.
+`locomotion.py` patrol, `vision_grok.py` Grok vision, `audio.py` TTS/SFX/voice, `dashboard.py` local
+web UI (off unless `REX_DASH=1`), `main.py` entry point, `sensorcheck.py` read-only sensor check,
+`tests/` pytest suite.
 
 ## License
 MIT

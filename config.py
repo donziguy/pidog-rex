@@ -5,7 +5,7 @@ from pathlib import Path
 
 ENV_PATH = Path.home() / ".config" / "pidog" / "security_dog.env"
 LOG_PATH = Path.home() / "pidog-rex" / "rex.log"
-_SECRET_NAMES = ("XAI_API_KEY", "XAI_KEY")
+_SECRET_NAMES = ("XAI_API_KEY", "XAI_KEY", "REX_DASH_TOKEN")
 _log_lock = threading.Lock()
 
 
@@ -121,3 +121,11 @@ SAFETY_STOP_CM = _f("PIDOG_REX_STOP_CM", 25)
 SAFETY_TILT_DEG = _f("PIDOG_REX_TILT_DEG", 30)
 SAFETY_BATTERY_LOW_V = _f("PIDOG_REX_BATTERY_LOW_V", 6.6)
 SAFETY_EMPTY_READS = _i("PIDOG_REX_EMPTY_READS", 3)  # consecutive empty ultrasonic reads while walking
+
+# Web dashboard. Off unless REX_DASH=1, and it refuses to listen without a token.
+DASH_ENABLED = _b("REX_DASH", False)
+DASH_HOST = os.environ.get("REX_DASH_HOST", "0.0.0.0") or "0.0.0.0"
+DASH_PORT = _i("REX_DASH_PORT", 8080)
+DASH_TOKEN = os.environ.get("REX_DASH_TOKEN", "")
+DASH_ALLOW_PATROL = _b("REX_DASH_ALLOW_PATROL", False)
+DASH_LOG_LINES = max(10, _i("REX_DASH_LOG_LINES", 80))
