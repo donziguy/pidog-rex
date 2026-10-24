@@ -68,6 +68,7 @@ def isolate(tmp_path, monkeypatch):
     import dashboard
     dashboard.extensions.clear()
     audio.speaking.clear()
+    audio.muted = False
     main._shutdown.clear()
     prev_int = signal.getsignal(signal.SIGINT)
     prev_term = signal.getsignal(signal.SIGTERM)

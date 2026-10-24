@@ -8,12 +8,16 @@ import brain
 
 speaking = threading.Event()
 _last_tts_end = 0.0
+muted = False  # Home Assistant mute switch. Default off.
 
 
 def speak(text: str, enabled: bool = True) -> None:
     global _last_tts_end
     text = (text or "").strip()
     if not text:
+        return
+    if muted:
+        log("TTS suppressed (muted)")
         return
     log(f"TTS: {text}")
     if not enabled:
