@@ -125,6 +125,26 @@ The dashboard gains an "Enroll from camera" button when the face module is loade
 route still returns `face_disabled` until `REX_FACE=1`. In simulation, `dog.people` can inject a
 sighting (`name`, `bbox` as x,y,w,h in 0..1, `known` or `stranger`) without a model.
 
+## Guard mode
+
+Off unless `REX_GUARD=1`. Even then Rex starts **disarmed** unless `REX_GUARD_ARMED=1` (or you arm
+him from the dashboard). Guard is shelf-only. Arming disables patrol, and `Locomotion.enable`
+refuses to start walking until he is disarmed. There is no guard walk.
+
+While armed, either of these sends one alert, then waits `REX_GUARD_COOLDOWN` seconds (default 60):
+
+* an unknown face from face recognition (a stranger hit)
+* motion: mean absolute difference of a 32×24 grayscale frame at or above `REX_GUARD_MOTION`
+  (default 18). The first frame is only a baseline.
+
+The alert includes a JPEG snapshot. Notifiers are pluggable and both default off:
+
+* `REX_NTFY_TOPIC` posts to `REX_NTFY_SERVER` (default `https://ntfy.sh`). `REX_NTFY_TOKEN` is optional.
+* `REX_ALERT_WEBHOOK_URL` receives JSON: `title`, `message`, `source` (`rex`), and `image_base64`.
+
+Leave the topic, token, and webhook empty in the repo. They are redacted from logs. The dashboard
+has Arm guard / Disarm buttons; the route returns `guard_disabled` until the feature is on.
+
 ## Web dashboard
 
 Off unless `REX_DASH=1`. Rex then serves a small page (Flask) at `REX_DASH_HOST`:`REX_DASH_PORT`,
@@ -155,8 +175,9 @@ Bind stays configurable; on a Pi that shares a LAN, prefer a token you would not
 `config.py` settings/logging, `brain.py` personality/mood/memory, `hardware.py` PiDog + camera,
 `sim.py` simulated dog (`REX_SIM` / `--sim` only; not imported on the Pi), `safety.py` SafetyMonitor,
 `locomotion.py` patrol, `vision_grok.py` Grok vision, `audio.py` TTS/SFX/voice, `dashboard.py` local
-web UI (off unless `REX_DASH=1`), `faces.py` local face enrollment (off unless `REX_FACE=1`),
-`main.py` entry point, `sensorcheck.py` read-only sensor check, `tests/` pytest suite.
+web UI (off unless `REX_DASH=1`), `faces.py` local face enrollment (off unless `REX_FACE=1`), `guard.py` shelf guard alerts
+(off unless `REX_GUARD=1`), `main.py` entry point, `sensorcheck.py` read-only sensor check,
+`tests/` pytest suite.
 
 ## License
 MIT

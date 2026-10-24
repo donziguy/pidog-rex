@@ -63,6 +63,8 @@ _PAGE = """<!DOCTYPE html>
     <button class="stop" id="stop" type="button">STOP</button>
     <button id="shelf" type="button">Shelf</button>
     <button id="patrol" type="button">Patrol</button>
+    <button id="guard-on" type="button">Arm guard</button>
+    <button id="guard-off" type="button">Disarm</button>
   </div>
   <form id="speak-form">
     <label>Speak <input id="speak" type="text" maxlength="200"></label>
@@ -113,6 +115,8 @@ async function refresh() {
 document.getElementById("stop").onclick = () => api("/api/stop", {method: "POST", body: "{}"});
 document.getElementById("shelf").onclick = () => api("/api/mode", {method: "POST", body: JSON.stringify({mode: "shelf"})});
 document.getElementById("patrol").onclick = () => api("/api/mode", {method: "POST", body: JSON.stringify({mode: "patrol"})});
+document.getElementById("guard-on").onclick = () => api("/api/guard", {method: "POST", body: JSON.stringify({armed: true})});
+document.getElementById("guard-off").onclick = () => api("/api/guard", {method: "POST", body: JSON.stringify({armed: false})});
 document.getElementById("speak-form").onsubmit = (ev) => {
   ev.preventDefault();
   api("/api/speak", {method: "POST", body: JSON.stringify({text: document.getElementById("speak").value})});

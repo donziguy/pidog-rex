@@ -87,6 +87,13 @@ def run(args) -> int:
         face_mod.ensure_registered()
     except Exception as exc:
         log(f"faces_unavailable={type(exc).__name__}")
+    try:
+        import guard as guard_mod
+        session.guard = guard_mod.Guard(session)
+        guard_mod.ensure_registered()
+    except Exception as exc:
+        log(f"guard_unavailable={type(exc).__name__}")
+        session.guard = None
     dash.start()
     brain.memory(); brain.set_state("online")
     deadline = time.time() + args.seconds if args.seconds else None
@@ -96,7 +103,9 @@ def run(args) -> int:
         audio.speak("Rex online. Shelf duty. Try not to be suspicious.", tts)
         if args.patrol:
             loco.allow_no_imu = args.allow_no_imu
-            if loco.enable("--patrol flag"):
+            if session.guard is not None and session.guard.armed:
+                audio.speak("Guard is armed. I am not walking.", tts)
+            elif loco.enable("--patrol flag"):
                 audio.speak("Supervised patrol. Say stop or touch my head to kill it.", tts)
             else:
                 audio.speak("My balance sensor is dead, so no walking.", tts)
@@ -112,7 +121,9 @@ def run(args) -> int:
                 elif cmd == "patrol":
                     if args.allow_voice_patrol or args.patrol:
                         loco.allow_no_imu = args.allow_no_imu
-                        if loco.enable("voice"):
+                        if session.guard is not None and session.guard.armed:
+                            audio.speak("Guard is armed. I am not walking.", tts)
+                        elif loco.enable("voice"):
                             audio.speak("Patrol time. Out of my way.", tts)
                     else:
                         audio.speak("Walking is disabled. Start me with patrol mode.", tts)
@@ -136,6 +147,8 @@ def run(args) -> int:
             photo = hw.photo()
             if face_mod is not None and C.FACE_ENABLED:
                 face_mod.observe(session, photo)
+            if session.guard is not None:
+                session.guard.tick(photo, session.face_hits)
             if photo:
                 force = args.force_first_grok and grok_calls == 0
                 hw.chest("analyzing")
