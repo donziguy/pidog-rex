@@ -10,7 +10,7 @@ Type=simple
 WorkingDirectory=%h/pidog-rex
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-%h/.config/pidog/security_dog.env
-# Shelf mode only. Never add --patrol here.
+# Shelf mode only. Never add --patrol or --follow here.
 ExecStart=/usr/bin/python3 %h/pidog-rex/main.py
 # SIGTERM -> main loop exits -> legs cleared, stop_and_lie, Pidog.close()
 KillSignal=SIGTERM

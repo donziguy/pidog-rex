@@ -101,7 +101,15 @@ def run(args) -> int:
     try:
         hw.move_head(0, 0, None, speed=30)
         audio.speak("Rex online. Shelf duty. Try not to be suspicious.", tts)
-        if args.patrol:
+        session.follow = None
+        if getattr(args, "follow", False):
+            import follow as follow_mod
+            session.follow = follow_mod.Follow(session)
+            if session.follow.start():
+                audio.speak("I will follow, but only while you are here.", tts)
+            else:
+                audio.speak("I am not following.", tts)
+        elif args.patrol:
             loco.allow_no_imu = args.allow_no_imu
             if session.guard is not None and session.guard.armed:
                 audio.speak("Guard is armed. I am not walking.", tts)
@@ -149,6 +157,8 @@ def run(args) -> int:
                 face_mod.observe(session, photo)
             if session.guard is not None:
                 session.guard.tick(photo, session.face_hits)
+            if session.follow is not None and session.follow.active and not session.face_hits and face_mod is not None:
+                session.face_hits = face_mod.recognize_hw(hw, photo=photo)
             if photo:
                 force = args.force_first_grok and grok_calls == 0
                 hw.chest("analyzing")
@@ -163,8 +173,10 @@ def run(args) -> int:
                 elif brain.mutter_due() and not loco.enabled:
                     audio.speak(brain.idle_mutter(brain.memory().get("last_scene_summary") or "boring shelf duty"), tts)
             hw.chest("locked" if safety.locked.is_set() else "idle")
-            # 5) walking (only if enabled and safety allows)
-            if loco.enabled:
+            # 5) walking (only if enabled and safety allows). Follow replaces patrol wander.
+            if session.follow is not None and session.follow.active:
+                session.follow.tick(session.face_hits)
+            elif loco.enabled:
                 for _ in range(2):
                     r = loco.tick()
                     if r in ("off", "locked", "halt", "resting", "rest", "aborted"):
@@ -186,6 +198,8 @@ def run(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Rex v2 PiDog")
     p.add_argument("--patrol", action="store_true", help="enable walking (supervised). Off by default.")
+    p.add_argument("--follow", action="store_true",
+                   help="supervised follow of a recognized person. Never put this in rex.service.")
     p.add_argument("--sim", action="store_true", help="simulated dog and camera (no Pi). Same as REX_SIM=1")
     p.add_argument("--allow-voice-patrol", action="store_true", help="let the voice command 'rex patrol' enable walking")
     p.add_argument("--seconds", type=float, default=None, help="run N seconds then lie down and exit")
