@@ -1,0 +1,12 @@
+*.env
+.env
+security_dog.env
+rex_memory.json
+*.tmp
+*.log
+logs/
+__pycache__/
+*.pyc
+*.jpg
+*.jpeg
+*.wav
