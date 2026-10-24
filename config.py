@@ -5,7 +5,10 @@ from pathlib import Path
 
 ENV_PATH = Path.home() / ".config" / "pidog" / "security_dog.env"
 LOG_PATH = Path.home() / "pidog-rex" / "rex.log"
-_SECRET_NAMES = ("XAI_API_KEY", "XAI_KEY", "REX_DASH_TOKEN")
+_SECRET_NAMES = (
+    "XAI_API_KEY", "XAI_KEY", "REX_DASH_TOKEN",
+    "REX_NTFY_TOKEN", "REX_ALERT_WEBHOOK_URL",
+)
 _log_lock = threading.Lock()
 
 
@@ -141,3 +144,15 @@ FACE_GREET_COOLDOWN = _f("REX_FACE_GREET_COOLDOWN", 90)
 FACE_STRANGER_COOLDOWN = _f("REX_FACE_STRANGER_COOLDOWN", 90)
 YUNET_MODEL = os.environ.get("REX_YUNET_MODEL", "")
 SFACE_MODEL = os.environ.get("REX_SFACE_MODEL", "")
+
+# Guard mode. Off unless REX_GUARD=1, and disarmed until REX_GUARD_ARMED=1 or a
+# later arm command. Shelf only: arming refuses patrol. Notifiers stay silent
+# until a topic or webhook URL is set. Neither belongs in the repo.
+GUARD_ENABLED = _b("REX_GUARD", False)
+GUARD_ARMED = _b("REX_GUARD_ARMED", False)
+GUARD_COOLDOWN = _f("REX_GUARD_COOLDOWN", 60)
+GUARD_MOTION = _f("REX_GUARD_MOTION", 18)  # mean abs gray diff (0-255) on a 32x24 frame
+NTFY_TOPIC = os.environ.get("REX_NTFY_TOPIC", "")
+NTFY_SERVER = (os.environ.get("REX_NTFY_SERVER") or "https://ntfy.sh").rstrip("/")
+NTFY_TOKEN = os.environ.get("REX_NTFY_TOKEN", "")
+ALERT_WEBHOOK_URL = os.environ.get("REX_ALERT_WEBHOOK_URL", "")
