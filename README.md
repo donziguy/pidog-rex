@@ -125,6 +125,30 @@ The dashboard gains an "Enroll from camera" button when the face module is loade
 route still returns `face_disabled` until `REX_FACE=1`. In simulation, `dog.people` can inject a
 sighting (`name`, `bbox` as x,y,w,h in 0..1, `known` or `stranger`) without a model.
 
+## Wake word
+
+Off unless `REX_WAKE_WORD=1`. While it is on, Rex drops voice commands that do not follow
+"hey rex". The phrase can share the utterance ("hey rex, patrol") or open a window of
+`REX_WAKE_WINDOW` seconds (default 8) for the next thing you say. "hey rex stop" still
+trips safety. With the flag off, commands work exactly as before.
+
+The gate is the transcript from the existing Vosk listener, so it stays offline and needs
+no extra model. If `openwakeword` is installed, a model named `REX_WAKE_MODEL` (default
+`hey_rex`) can arm that same window from the microphone audio. A missing model just leaves
+the phrase gate in place.
+
+`REX_STT_ENGINE=whisper` transcribes with faster-whisper instead of Vosk: `tiny` or `base`,
+CPU, int8 (`REX_WHISPER_MODEL`, `REX_WHISPER_COMPUTE`). Anything else is forced back to tiny
+int8. If the package is not installed, Rex logs that and uses Vosk.
+
+```bash
+pip install faster-whisper          # optional
+# pip install openwakeword          # optional, plus a hey_rex model if you have one
+# in security_dog.env:
+#   REX_WAKE_WORD=1
+#   REX_STT_ENGINE=vosk
+```
+
 ## Home Assistant
 
 Off unless `REX_MQTT=1`. Rex will not connect unless `REX_MQTT_HOST` is set. There is no default
@@ -225,7 +249,8 @@ Bind stays configurable; on a Pi that shares a LAN, prefer a token you would not
 `sim.py` simulated dog (`REX_SIM` / `--sim` only; not imported on the Pi), `safety.py` SafetyMonitor,
 `locomotion.py` patrol, `vision_grok.py` Grok vision, `audio.py` TTS/SFX/voice, `dashboard.py` local
 web UI (off unless `REX_DASH=1`), `faces.py` local face enrollment (off unless `REX_FACE=1`), `guard.py` shelf guard alerts (off unless `REX_GUARD=1`), `follow.py` supervised follow (`--follow` only, never in `rex.service`),
-`hass_mqtt.py` Home Assistant discovery (off unless `REX_MQTT=1`), `main.py` entry point,
+`hass_mqtt.py` Home Assistant discovery (off unless `REX_MQTT=1`),
+`wake.py` offline "hey rex" gate (off unless `REX_WAKE_WORD=1`), `main.py` entry point,
 `sensorcheck.py` read-only sensor check, `tests/` pytest suite.
 
 ## License

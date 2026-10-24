@@ -174,3 +174,15 @@ MQTT_PORT = _i("REX_MQTT_PORT", 1883)
 MQTT_USER = os.environ.get("REX_MQTT_USER", "")
 MQTT_PASSWORD = os.environ.get("REX_MQTT_PASSWORD", "")
 MQTT_PREFIX = (os.environ.get("REX_MQTT_PREFIX") or "rex").strip("/") or "rex"
+
+# Wake word. Off unless REX_WAKE_WORD=1. When it is on, a transcript has to contain
+# "hey rex" (or an optional openWakeWord hit) before Rex will act on a command.
+# The command window stays open for REX_WAKE_WINDOW seconds. STT stays on Vosk
+# unless REX_STT_ENGINE=whisper, which uses faster-whisper tiny/base on CPU int8.
+WAKE_WORD = _b("REX_WAKE_WORD", False)
+WAKE_WINDOW = _f("REX_WAKE_WINDOW", 8)
+WAKE_THRESHOLD = _f("REX_WAKE_THRESHOLD", 0.5)
+WAKE_MODEL = os.environ.get("REX_WAKE_MODEL", "hey_rex") or "hey_rex"
+STT_ENGINE = (os.environ.get("REX_STT_ENGINE") or "vosk").strip().lower() or "vosk"
+WHISPER_MODEL = (os.environ.get("REX_WHISPER_MODEL") or "tiny").strip().lower() or "tiny"
+WHISPER_COMPUTE = (os.environ.get("REX_WHISPER_COMPUTE") or "int8").strip().lower() or "int8"

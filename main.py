@@ -74,6 +74,13 @@ def run(args) -> int:
     loco = Locomotion(hw, safety)
     listener = audio.Listener()
     listener.on_stop = lambda: safety.trip("voice_stop")
+    if C.WAKE_WORD:
+        import wake
+        wake.reset_state()
+        audio.command_filter = wake.accept_command
+        log("wake_word_enabled phrase='hey rex'")
+    else:
+        audio.command_filter = None
     safety.on_trip = lambda r: loco.disable(f"trip:{r}")
     safety.start()
     if not args.no_listen:
