@@ -179,12 +179,28 @@ def read_raw_accel(dog):
         return None
 
 
+# A live SH3001 jitters in the low bits of every sample. This dog's chip can
+# instead repeat one accel frame (and the same gyro frame) forever after the
+# first read, so tilt_deg stays near 0 while the body is moved. Safety polls
+# every SAFETY_POLL seconds (0.1); about 3 s of byte-identical raw accel is a
+# frozen chip. 15 reads is only 1.5 s at that rate, so 15 is the floor and the
+# window is 3 s.
+IMU_STALE_READS = max(15, int(round(3.0 / (C.SAFETY_POLL if C.SAFETY_POLL > 0 else 0.1))))
+
+
+def _counts(raw) -> tuple[int, int, int]:
+    """Integer accelerometer counts. Byte-identical frames compare equal."""
+    return (int(round(raw[0])), int(round(raw[1])), int(round(raw[2])))
+
+
 class TiltTracker:
     """Tilt of the current gravity vector relative to a startup baseline.
 
     ``tilt_deg`` is the angle between the two vectors. ``pitch`` and ``roll`` are
     the signed components after the baseline is rotated onto -X, for logs.
     A failed read keeps the last good sample and increments ``fail_streak``.
+    A run of identical raw accel frames sets ``stale`` and counts the same way:
+    the numbers are readable, but they are not a measurement.
     """
 
     def __init__(self):
@@ -193,6 +209,11 @@ class TiltTracker:
         self.sample_count = 0
         self.tilt_deg = 0.0
         self.fail_streak = 0
+        self.stale = False
+        self._announced = False
+        self._last_key = None
+        self._same = 0
+        self.exempt = False  # sim stays exempt unless a test opts in
         self.last = (0.0, 0.0)
 
     def capture(self, read, samples: int = 10, gap: float = 0.0) -> bool:
@@ -211,10 +232,49 @@ class TiltTracker:
         self.fail_streak = 0
         self.tilt_deg = 0.0
         self.last = (0.0, 0.0)
+        keys = [_counts(v) for v in vecs]
+        self._last_key = keys[-1]
+        run = 1
+        for prev in reversed(keys[:-1]):
+            if prev != keys[-1]:
+                break
+            run += 1
+        self._same = run
+        # The whole startup window came back byte-identical. A real chip does
+        # not do that while it is still; the frozen SH3001 does, from read one.
+        if not self.exempt and len(vecs) == samples and run == samples:
+            self.stale = True
+            self._announced = True
+            log("imu_stale_at_boot")
         return True
+
+    def _observe(self, raw) -> bool:
+        """Track identical frames. Return True when the chip is frozen."""
+        if self.exempt:
+            return False
+        key = _counts(raw)
+        if self._last_key is not None and key == self._last_key:
+            self._same += 1
+        else:
+            self._same = 1
+            if self.stale:
+                self.stale = False
+                self._announced = False
+        self._last_key = key
+        if not self.stale and self._same >= IMU_STALE_READS:
+            self.stale = True
+            if not self._announced:
+                log("imu_stale")
+                self._announced = True
+        return self.stale
 
     def update(self, raw) -> tuple[float, float]:
         if raw is None or self.baseline is None or _norm(raw) < _ACCEL_MIN_COUNTS:
+            self.fail_streak += 1
+            return self.last
+        if self._observe(raw):
+            # Same as a missed read: keep the last real sample and let the
+            # safety streak reach SAFETY_EMPTY_READS.
             self.fail_streak += 1
             return self.last
         self.fail_streak = 0
@@ -243,8 +303,14 @@ class Hardware:
         self._cam_lock = threading.Lock()
         self.imu_ok = "imu" in getattr(self.dog, "thread_list", [])
         self._tilt = TiltTracker()
+        # A sim dog repeats one exact vector while it sits still. That is not
+        # a frozen chip. Tests opt in with sim.configure(imu_frozen_check=True)
+        # before this object is built.
+        self._tilt.exempt = bool(self.simulated and not getattr(self.dog, "imu_frozen_check", False))
         self.tilt_deg = 0.0
         self.imu_fail_streak = 0
+        self.imu_stale = False
+        self._stale_override_logged = False
         self.tilt_baseline = None
         if self.imu_ok:
             # The dog is still in the boot lie pose. Average a handful of raw
@@ -252,6 +318,7 @@ class Hardware:
             gap = 0.0 if self.simulated else 0.02
             if self._tilt.capture(lambda: read_raw_accel(self.dog), samples=10, gap=gap):
                 self.tilt_baseline = self._tilt.baseline
+                self.imu_stale = self._tilt.stale
                 b = self.tilt_baseline
                 log(f"tilt_baseline samples={self._tilt.sample_count} ax={b[0]:.0f} ay={b[1]:.0f} az={b[2]:.0f}")
             else:
@@ -274,12 +341,15 @@ class Hardware:
         the baseline), which is what the safety monitor compares to
         ``SAFETY_TILT_DEG``. Pitch and roll are the signed components, for logs.
         A failed IMU read returns the last good sample and bumps
-        ``imu_fail_streak``. With no IMU at all, both stay 0 and the streak
-        does not climb (patrol is already refused).
+        ``imu_fail_streak``. A frozen chip (identical raw accel for
+        ``IMU_STALE_READS`` samples, or an identical startup window) does the
+        same and sets ``imu_stale``. With no IMU at all, both stay 0 and the
+        streak does not climb (patrol is already refused).
         """
         if not self.imu_ok:
             self.tilt_deg = 0.0
             self.imu_fail_streak = 0
+            self.imu_stale = False
             return 0.0, 0.0
         try:
             pitch, roll = self._tilt.update(read_raw_accel(self.dog))
@@ -287,7 +357,19 @@ class Hardware:
             pitch, roll = self._tilt.update(None)
         self.tilt_deg = self._tilt.tilt_deg
         self.imu_fail_streak = self._tilt.fail_streak
+        self.imu_stale = self._tilt.stale
         return pitch, roll
+
+    def note_stale_override(self) -> None:
+        """Log once when ``--allow-no-imu`` is letting a frozen chip through.
+
+        Called at startup if the baseline was already stuck, and again from the
+        safety thread if the chip freezes later. The second call is a no-op.
+        """
+        if self._stale_override_logged or not self.imu_stale:
+            return
+        self._stale_override_logged = True
+        log("imu_stale_overridden")
 
     def battery(self) -> float | None:
         try:

@@ -6,8 +6,13 @@ Triggers (any one):
   * body tilt > SAFETY_TILT_DEG (any time). Tilt is the angle between the
     current raw acceleration and the vector captured at startup, not pidog's
     pitch/roll (those assume gravity is on the accelerometer X axis).
-  * N consecutive IMU read failures (any time). A single miss keeps the last
-    good sample; the streak matches SAFETY_EMPTY_READS.
+  * N consecutive IMU read failures (any time), including a frozen chip whose
+    raw accel repeats (imu_stale). A single miss keeps the last good sample;
+    the streak matches SAFETY_EMPTY_READS. The trip reason stays imu_read_fail,
+    so patrol and follow stop the same way they do for a dead read.
+    ``--allow-no-imu`` is the supervised exception: a stale chip does not trip
+    and does not refuse patrol/follow. Tilt stop is blind in that case, same
+    as a missing IMU. Distance, battery, and touch still trip.
   * battery below SAFETY_BATTERY_LOW_V for ~3 s (any time)
   * head touch while walking (in shelf mode touch is just a pet)
   * external trip() e.g. the "stop" voice command
@@ -22,9 +27,10 @@ import brain
 
 
 class SafetyMonitor(threading.Thread):
-    def __init__(self, hw):
+    def __init__(self, hw, allow_no_imu: bool = False):
         super().__init__(name="safety", daemon=True)
         self.hw = hw
+        self.allow_no_imu = bool(allow_no_imu)
         self.walking = threading.Event()      # set by Locomotion while legs may move
         self.locked = threading.Event()
         self.reason = ""
@@ -85,9 +91,17 @@ class SafetyMonitor(threading.Thread):
         d = hw.distance(); pitch, roll = hw.tilt(); t = hw.touch()
         tilt_deg = float(getattr(hw, "tilt_deg", max(abs(pitch), abs(roll))))
         self.last.update(distance=d, pitch=round(pitch, 1), roll=round(roll, 1), tilt=round(tilt_deg, 1), touch=t)
-        # The angle is the trip, not max(|pitch|, |roll|). On a tilted mount a
-        # 35 deg rotation can split into two components that are each under 30.
-        if tilt_deg > C.SAFETY_TILT_DEG:
+        stale = bool(getattr(hw, "imu_stale", False))
+        # --allow-no-imu: a frozen chip is the same as no IMU. The angle is
+        # stuck, so tilt stop is blind, and the stale streak must not lock
+        # movement. A live chip (not stale) still trips on tilt and bad reads.
+        if self.allow_no_imu and stale:
+            note = getattr(hw, "note_stale_override", None)
+            if note:
+                note()
+        elif tilt_deg > C.SAFETY_TILT_DEG:
+            # The angle is the trip, not max(|pitch|, |roll|). On a tilted mount a
+            # 35 deg rotation can split into two components that are each under 30.
             self.trip(f"tilt {tilt_deg:.0f} pitch={pitch:.0f} roll={roll:.0f}")
         elif int(getattr(hw, "imu_fail_streak", 0) or 0) >= C.SAFETY_EMPTY_READS:
             self.trip("imu_read_fail")

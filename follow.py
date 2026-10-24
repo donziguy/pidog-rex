@@ -58,7 +58,12 @@ class Follow:
         if guard is not None and not guard.allow_walk():
             log("follow_refused guard_armed")
             return False
-        if not self.session.hw.imu_ok and not bool(getattr(self.session.args, "allow_no_imu", False)):
+        allow = bool(getattr(self.session.args, "allow_no_imu", False))
+        stale = bool(getattr(self.session.hw, "imu_stale", False))
+        if stale and not allow:
+            log("follow_refused imu_stale")
+            return False
+        if not self.session.hw.imu_ok and not allow:
             log("follow_refused imu_unavailable")
             return False
         self.active = True

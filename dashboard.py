@@ -274,6 +274,7 @@ class Dashboard:
             "head": dict(getattr(self.hw, "head", {}) or {}),
             "allow_patrol": bool(C.DASH_ALLOW_PATROL),
             "imu_ok": bool(getattr(self.hw, "imu_ok", False)),
+            "imu_stale": bool(getattr(self.hw, "imu_stale", False)),
         }
 
     def build_app(self):

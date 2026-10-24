@@ -7,7 +7,7 @@ import pytest
 
 import config as C
 import sim
-from hardware import TiltTracker, angle_between, read_raw_accel, raw_accel_for_attitude
+from hardware import IMU_STALE_READS, TiltTracker, angle_between, read_raw_accel, raw_accel_for_attitude
 from safety import SafetyMonitor
 from support import assert_halted
 
@@ -265,3 +265,239 @@ def test_sensorcheck_offers_imu_mode(capsys):
         sensorcheck.main(["--help"])
     assert exc.value.code == 0
     assert "--imu" in capsys.readouterr().out
+
+
+def _logged(text: str, msg: str) -> list[str]:
+    suffix = f"] {msg}"
+    return [line for line in text.splitlines() if line.endswith(suffix)]
+
+
+def _scripted_dog(make_hw, script, mount=_MOUNTS["x"]):
+    """Sim dog with the frozen-IMU check on and a raw-accel script."""
+    sim.configure(imu_frozen_check=True, imu_mount=mount, imu_script=script)
+    return make_hw()
+
+
+def test_identical_accel_stream_trips_stale_and_safety(make_hw, capsys):
+    """A jittery boot, then one accel frame repeated, is a frozen chip.
+
+    The safety trip is imu_read_fail, which is what already stops patrol and follow.
+    """
+    mount = _MOUNTS["x"]
+    frozen = (mount[0] + 50.0, mount[1], mount[2])
+    seen = {"n": 0}
+
+    def script():
+        seen["n"] += 1
+        if seen["n"] <= 10:
+            return (mount[0] + seen["n"], mount[1], mount[2])
+        return frozen
+
+    hw = _scripted_dog(make_hw, script, mount)
+    mon = SafetyMonitor(hw)
+    assert hw.imu_stale is False
+    capsys.readouterr()
+    for _ in range(IMU_STALE_READS - 1):
+        hw.tilt()
+        assert hw.imu_stale is False
+        assert hw.imu_fail_streak == 0
+    hw.tilt()
+    assert hw.imu_stale is True
+    assert hw.imu_fail_streak == 1
+    text = capsys.readouterr().out
+    assert len(_logged(text, "imu_stale")) == 1
+    assert _logged(text, "imu_stale_at_boot") == []
+    while hw.imu_fail_streak < C.SAFETY_EMPTY_READS - 1:
+        hw.tilt()
+        assert not mon.locked.is_set()
+    assert _logged(capsys.readouterr().out, "imu_stale") == []
+    mon._tick()
+    assert_halted(mon, hw.dog)
+    assert mon.reason == "imu_read_fail"
+    assert not mon.allow_move()
+
+
+def test_jittering_accel_does_not_go_stale(make_hw, capsys):
+    mount = _MOUNTS["yz"]
+    seen = {"n": 0}
+
+    def script():
+        seen["n"] += 1
+        return (mount[0] + (seen["n"] % 5) - 2, mount[1], mount[2])
+
+    hw = _scripted_dog(make_hw, script, mount)
+    mon = SafetyMonitor(hw)
+    for _ in range(IMU_STALE_READS + C.SAFETY_EMPTY_READS + 5):
+        mon._tick()
+        assert hw.imu_stale is False
+        assert hw.imu_fail_streak == 0
+        assert not mon.locked.is_set()
+    assert "imu_stale" not in capsys.readouterr().out
+
+
+def test_stale_clears_when_samples_vary(make_hw, capsys):
+    mount = _MOUNTS["x"]
+    frozen = (mount[0] + 50.0, mount[1], mount[2])
+    seen = {"n": 0}
+
+    def script():
+        seen["n"] += 1
+        if seen["n"] <= 10:
+            return (mount[0] + seen["n"], mount[1], mount[2])
+        return frozen
+
+    hw = _scripted_dog(make_hw, script, mount)
+    for _ in range(IMU_STALE_READS):
+        hw.tilt()
+    assert hw.imu_stale is True
+    assert hw.imu_fail_streak == 1
+    hw.dog.imu_raw.set((frozen[0] + 200.0, frozen[1], frozen[2]))
+    hw.tilt()
+    assert hw.imu_stale is False
+    assert hw.imu_fail_streak == 0
+    hw.dog.imu_raw.set((frozen[0] - 200.0, frozen[1], frozen[2]))
+    hw.tilt()
+    assert hw.imu_stale is False
+    assert len(_logged(capsys.readouterr().out, "imu_stale")) == 1
+
+
+def test_identical_baseline_is_stale_at_boot(make_hw, capsys):
+    sim.configure(imu_frozen_check=True)
+    hw = make_hw()
+    text = capsys.readouterr().out
+    assert hw.imu_stale is True
+    assert len(_logged(text, "imu_stale_at_boot")) == 1
+    assert _logged(text, "imu_stale") == []
+    mon = SafetyMonitor(hw)
+    for _ in range(C.SAFETY_EMPTY_READS - 1):
+        mon._tick()
+        assert not mon.locked.is_set()
+        assert hw.imu_stale is True
+    mon._tick()
+    assert_halted(mon, hw.dog)
+    assert mon.reason == "imu_read_fail"
+
+
+def test_sensorcheck_imu_prints_stale_flag(monkeypatch, capsys):
+    import sensorcheck
+
+    def _run(expect: str) -> None:
+        sleeps = {"n": 0}
+
+        def sleep(_dt):
+            sleeps["n"] += 1
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(sensorcheck.time, "sleep", sleep)
+        monkeypatch.setattr(sensorcheck.os, "_exit", lambda _code: None)
+        sensorcheck.main(["--imu"])
+        out = capsys.readouterr().out
+        assert f"stale={expect}" in out
+
+    _run("False")
+    sim.configure(imu_frozen_check=True)
+    _run("True")
+
+
+def _walk_session(hw, mon, allow):
+    import argparse
+
+    import main
+    from locomotion import Locomotion
+
+    loco = Locomotion(hw, mon)
+    loco.allow_no_imu = allow
+    args = argparse.Namespace(allow_no_imu=allow, patrol=False, follow=False, allow_voice_patrol=False)
+    return main.Session(hw, mon, loco, listener=None, tts=False, args=args), loco
+
+
+def test_stale_without_override_trips_and_refuses_patrol_and_follow(make_hw, capsys):
+    import follow as follow_mod
+
+    sim.configure(imu_frozen_check=True)
+    hw = make_hw()
+    mon = SafetyMonitor(hw, allow_no_imu=False)
+    session, loco = _walk_session(hw, mon, False)
+    assert loco.enable("patrol") is False
+    assert loco.enabled is False
+    assert follow_mod.Follow(session).start() is False
+    for _ in range(C.SAFETY_EMPTY_READS):
+        mon._tick()
+    text = capsys.readouterr().out
+    assert "patrol_refused imu_stale" in text
+    assert "follow_refused imu_stale" in text
+    assert "imu_stale_overridden" not in text
+    assert_halted(mon, hw.dog)
+    assert mon.reason == "imu_read_fail"
+
+
+def test_allow_no_imu_lets_a_frozen_chip_walk(make_hw, capsys):
+    import follow as follow_mod
+
+    sim.configure(imu_frozen_check=True)
+    hw = make_hw()
+    assert hw.imu_stale is True
+    hw.note_stale_override()
+    mon = SafetyMonitor(hw, allow_no_imu=True)
+    session, loco = _walk_session(hw, mon, True)
+    assert loco.enable("override") is True
+    assert follow_mod.Follow(session).start() is True
+    for _ in range(C.SAFETY_EMPTY_READS + 5):
+        mon._tick()
+        assert not mon.locked.is_set()
+    text = capsys.readouterr().out
+    assert len(_logged(text, "imu_stale_overridden")) == 1
+    mon._tick()
+    assert _logged(capsys.readouterr().out, "imu_stale_overridden") == []
+    mon.walking.set()
+    hw.dog.distance.set(10)
+    mon._tick()
+    assert mon.reason.startswith("obstacle")
+
+
+def test_allow_no_imu_logs_once_when_the_chip_freezes_later(make_hw, capsys):
+    mount = _MOUNTS["x"]
+    frozen = (mount[0] + 50.0, mount[1], mount[2])
+    seen = {"n": 0}
+
+    def script():
+        seen["n"] += 1
+        if seen["n"] <= 10:
+            return (mount[0] + seen["n"], mount[1], mount[2])
+        return frozen
+
+    hw = _scripted_dog(make_hw, script, mount)
+    assert hw.imu_stale is False
+    hw.note_stale_override()
+    capsys.readouterr()
+    mon = SafetyMonitor(hw, allow_no_imu=True)
+    for _ in range(IMU_STALE_READS - 1):
+        mon._tick()
+        assert not mon.locked.is_set()
+    assert hw.imu_stale is False
+    mon._tick()
+    assert hw.imu_stale is True
+    assert not mon.locked.is_set()
+    assert mon.reason == ""
+    assert len(_logged(capsys.readouterr().out, "imu_stale_overridden")) == 1
+    for _ in range(5):
+        mon._tick()
+    assert not mon.locked.is_set()
+    assert _logged(capsys.readouterr().out, "imu_stale_overridden") == []
+
+
+def test_allow_no_imu_still_trips_a_live_tilt(make_hw, capsys):
+    hw = make_hw()
+    hw.dog.pitch = 35
+    mon = SafetyMonitor(hw, allow_no_imu=True)
+    mon._tick()
+    assert_halted(mon, hw.dog)
+    assert mon.reason.startswith("tilt ")
+    assert "imu_stale_overridden" not in capsys.readouterr().out
+
+
+def test_allow_no_imu_help_mentions_a_frozen_imu():
+    import main
+    text = main.build_parser().format_help()
+    assert "--allow-no-imu" in text
+    assert "frozen" in text
