@@ -94,6 +94,13 @@ def run(args) -> int:
     except Exception as exc:
         log(f"guard_unavailable={type(exc).__name__}")
         session.guard = None
+    try:
+        import hass_mqtt
+        session.mqtt = hass_mqtt.HomeAssistant(session)
+        session.mqtt.start()
+    except Exception as exc:
+        log(f"mqtt_unavailable={type(exc).__name__}")
+        session.mqtt = None
     dash.start()
     brain.memory(); brain.set_state("online")
     deadline = time.time() + args.seconds if args.seconds else None
@@ -181,6 +188,8 @@ def run(args) -> int:
                     r = loco.tick()
                     if r in ("off", "locked", "halt", "resting", "rest", "aborted"):
                         break
+            if session.mqtt is not None:
+                session.mqtt.publish_state()
             _shutdown.wait(0.5)
         log(f"main_loop_exit grok_calls={grok_calls} safety_ticks={safety.ticks} locked={safety.locked.is_set()} reason={safety.reason}")
         return 0
@@ -189,6 +198,8 @@ def run(args) -> int:
         return 1
     finally:
         loco.disable("shutdown")
+        if getattr(session, "mqtt", None) is not None:
+            session.mqtt.stop()
         dash.stop()
         listener.stop(); safety.stop()
         brain.save()

@@ -125,6 +125,27 @@ The dashboard gains an "Enroll from camera" button when the face module is loade
 route still returns `face_disabled` until `REX_FACE=1`. In simulation, `dog.people` can inject a
 sighting (`name`, `bbox` as x,y,w,h in 0..1, `known` or `stranger`) without a model.
 
+## Home Assistant
+
+Off unless `REX_MQTT=1`. Rex will not connect unless `REX_MQTT_HOST` is set. There is no default
+broker address, and the password (`REX_MQTT_PASSWORD`) is redacted from logs. Optional
+`REX_MQTT_USER`, `REX_MQTT_PORT` (default 1883), and `REX_MQTT_PREFIX` (default `rex`).
+
+On connect, Rex publishes Home Assistant MQTT discovery:
+
+| Entity | Kind | What it does |
+| --- | --- | --- |
+| battery | sensor | pack voltage |
+| mode | sensor | `shelf`, `patrol`, `guard`, or `follow` |
+| person_seen | sensor | primary name, another known name, `stranger`, or `none` |
+| guard | switch | arm / disarm guard (still shelf-only) |
+| mute | switch | drop TTS and the bark button |
+| bark | button | play the bark effect |
+| speak | button | say "Rex here." A payload other than `PRESS` is spoken as text |
+
+`pip install paho-mqtt` on the Pi. Leave the host and password out of the repo and out of
+`rex.service`.
+
 ## Follow mode
 
 Follow is **supervised** and **off unless you pass `--follow`**. No environment variable turns it
@@ -203,8 +224,8 @@ Bind stays configurable; on a Pi that shares a LAN, prefer a token you would not
 `config.py` settings/logging, `brain.py` personality/mood/memory, `hardware.py` PiDog + camera,
 `sim.py` simulated dog (`REX_SIM` / `--sim` only; not imported on the Pi), `safety.py` SafetyMonitor,
 `locomotion.py` patrol, `vision_grok.py` Grok vision, `audio.py` TTS/SFX/voice, `dashboard.py` local
-web UI (off unless `REX_DASH=1`), `faces.py` local face enrollment (off unless `REX_FACE=1`), `guard.py` shelf guard alerts (off unless `REX_GUARD=1`), `follow.py` supervised follow
-(`--follow` only, never in `rex.service`), `main.py` entry point,
+web UI (off unless `REX_DASH=1`), `faces.py` local face enrollment (off unless `REX_FACE=1`), `guard.py` shelf guard alerts (off unless `REX_GUARD=1`), `follow.py` supervised follow (`--follow` only, never in `rex.service`),
+`hass_mqtt.py` Home Assistant discovery (off unless `REX_MQTT=1`), `main.py` entry point,
 `sensorcheck.py` read-only sensor check, `tests/` pytest suite.
 
 ## License

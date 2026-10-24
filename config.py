@@ -8,6 +8,7 @@ LOG_PATH = Path.home() / "pidog-rex" / "rex.log"
 _SECRET_NAMES = (
     "XAI_API_KEY", "XAI_KEY", "REX_DASH_TOKEN",
     "REX_NTFY_TOKEN", "REX_ALERT_WEBHOOK_URL",
+    "REX_MQTT_PASSWORD",
 )
 _log_lock = threading.Lock()
 
@@ -164,3 +165,12 @@ FOLLOW_MAX_STEPS = max(1, _i("REX_FOLLOW_MAX_STEPS", 8))
 FOLLOW_MAX_SECONDS = _f("REX_FOLLOW_MAX_SECONDS", 60)
 FOLLOW_LOST_TICKS = max(1, _i("REX_FOLLOW_LOST_TICKS", 5))
 FOLLOW_SPEED = min(WALK_SPEED, _i("REX_FOLLOW_SPEED", 50))
+
+# Home Assistant MQTT discovery. Off unless REX_MQTT=1, and it will not connect
+# without REX_MQTT_HOST. There is no default broker address.
+MQTT_ENABLED = _b("REX_MQTT", False)
+MQTT_HOST = (os.environ.get("REX_MQTT_HOST") or "").strip()
+MQTT_PORT = _i("REX_MQTT_PORT", 1883)
+MQTT_USER = os.environ.get("REX_MQTT_USER", "")
+MQTT_PASSWORD = os.environ.get("REX_MQTT_PASSWORD", "")
+MQTT_PREFIX = (os.environ.get("REX_MQTT_PREFIX") or "rex").strip("/") or "rex"
