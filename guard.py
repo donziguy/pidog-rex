@@ -117,7 +117,7 @@ class Guard:
     def __init__(self, session, notifiers=None):
         self.session = session
         self.notifiers = list(build_notifiers() if notifiers is None else notifiers)
-        self.last_alert = 0.0
+        self.last_alert = None  # None: never alerted. 0 would look recent on a fresh boot.
         self.prev = None
         self.last_reason = ""
         self.armed = bool(C.GUARD_ENABLED and C.GUARD_ARMED)
@@ -173,7 +173,7 @@ class Guard:
         else:
             return None
         now = time.monotonic()
-        if now - self.last_alert < C.GUARD_COOLDOWN:
+        if self.last_alert is not None and now - self.last_alert < C.GUARD_COOLDOWN:
             log(f"guard_cooldown reason={reason}")
             return "cooldown"
         self.last_alert = now

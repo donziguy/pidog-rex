@@ -57,6 +57,7 @@ def test_defaults_are_off_and_secrets_are_redacted(monkeypatch, capsys):
 
 
 def test_unknown_person_and_motion_alert_once_then_cool_down(make_hw, monkeypatch):
+    monkeypatch.setattr(guard.time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(C, "GUARD_ENABLED", True)
     monkeypatch.setattr(C, "GUARD_ARMED", False)
     monkeypatch.setattr(C, "GUARD_COOLDOWN", 60)
@@ -78,7 +79,7 @@ def test_unknown_person_and_motion_alert_once_then_cool_down(make_hw, monkeypatc
     assert rec.calls[0]["image"][:2] == b"\xff\xd8"
     assert g.tick(black, hits=[stranger]) == "cooldown"
     assert len(rec.calls) == 1
-    g.last_alert = 0
+    g.last_alert = None
     g.prev = black
     assert guard.motion_score(black, black) == 0
     assert g.tick(black, hits=[]) is None
@@ -173,6 +174,8 @@ def test_dashboard_arm_blocks_patrol(make_hw, monkeypatch, capsys):
 
 
 def test_armed_run_does_not_walk_and_alerts_on_a_stranger(monkeypatch, capsys):
+    monkeypatch.setattr(guard.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(faces.time, "monotonic", lambda: 10.0)
     monkeypatch.setattr(C, "GUARD_ENABLED", True)
     monkeypatch.setattr(C, "GUARD_ARMED", True)
     monkeypatch.setattr(C, "FACE_ENABLED", True)
