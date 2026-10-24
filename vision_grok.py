@@ -7,6 +7,7 @@ from config import log
 import brain
 
 _last_thumb = None
+_pending_thumb = None  # latest measurement; committed only when a vision call is spent
 _last_call = 0.0
 _fail_streak = 0
 
@@ -14,24 +15,33 @@ _fail_streak = 0
 def _thumb(path):
     from PIL import Image
     with Image.open(path) as im:
-        return list(im.convert("L").resize((32, 24)).getdata())
+        gray = im.convert("L").resize((32, 24))
+        # getdata() warns on Pillow >= 10; get_flattened_data is the same pixels.
+        pixels = getattr(gray, "get_flattened_data", gray.getdata)()
+        return list(pixels)
 
 
 def scene_changed(path) -> tuple[bool, float]:
-    global _last_thumb
+    """Diff against the last frame we actually sent for vision. Does not move that baseline."""
+    global _pending_thumb
     try:
         t = _thumb(path)
     except Exception as exc:
         log(f"thumb_error={exc}")
+        _pending_thumb = None
         return False, 0.0
+    _pending_thumb = t
     if _last_thumb is None:
-        _last_thumb = t
         return True, 255.0
     diff = sum(abs(a - b) for a, b in zip(t, _last_thumb)) / len(t)
-    changed = diff >= C.SCENE_DIFF_THRESHOLD
-    if changed:
-        _last_thumb = t
-    return changed, diff
+    return diff >= C.SCENE_DIFF_THRESHOLD, diff
+
+
+def _commit_scene() -> None:
+    """Remember the frame we are about to spend a vision call on."""
+    global _last_thumb, _pending_thumb
+    if _pending_thumb is not None:
+        _last_thumb = _pending_thumb
 
 
 def _jpeg_320(path) -> bytes:
@@ -70,6 +80,10 @@ def analyze(path, force: bool = False) -> dict:
     changed, diff = scene_changed(path)
     if not due(changed, force):
         return {**empty("throttled"), "_changed": changed, "_diff": round(diff, 1)}
+    # Commit only once we spend the call. Updating the baseline on a throttled
+    # change would swallow it, and Grok would never see a person who walked in
+    # during the cooldown.
+    _commit_scene()
     key = C.xai_key()
     _last_call = time.time()
     if not key:
