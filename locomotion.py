@@ -1,8 +1,10 @@
 """Patrol walking. Off unless Rex is started with --patrol or told "rex patrol".
 
-Every move: safety.allow_move() -> plan from a fresh distance read -> 1-2 steps at
-WALK_SPEED with safety.walking set (so the 10 Hz monitor enforces stop-distance,
-empty reads and head touch) -> poll until the legs finish or the monitor trips.
+Every move: safety.allow_move() -> plan from a fresh distance read -> up to
+WALK_MAX_STEPS at WALK_SPEED with safety.walking set (so the 10 Hz monitor
+enforces stop-distance, empty reads and head touch) -> poll until the legs
+finish or the monitor trips. The monitor sees the speed of this move so a
+fast walk uses the longer stop distance.
 """
 from __future__ import annotations
 import time
@@ -10,6 +12,7 @@ import config as C
 from config import log
 import abort
 import brain
+from safety import stop_cm_for_speed
 
 # Before a step, take several echoes. Gait vibration and a nose-down head
 # return None for a sample or two; one miss must not cancel the walk.
@@ -20,8 +23,13 @@ DISTANCE_SAMPLE_GAP = 0.06
 # origin. do_action queues that many angle groups per step. robot_hat 2.3.5
 # Robot.servo_move spends (-9.9 * speed + 1000) ms on each group (at least
 # 10 ms) before pidog pops it. At speed 65 that is ~0.36 s * 49 = ~17 s per
-# step, ~35 s for two. The old deadline of 8 + 3*steps (11 s / 14 s) always
-# fired "walk timeout -> legs_stop" before the buffer could empty.
+# step. At the default 95 a frame is ~60 ms; at the cap of 98 it is ~30 ms.
+# Speed 100 is exactly the 10 ms floor. The old deadline of 8 + 3*steps always
+# fired "walk timeout -> legs_stop" at speed 65 before the buffer could empty.
+# leg_wait_budget stays at least that long, and 4x the nominal frame time, so
+# a normal walk at 95, 98, or the 10 ms floor is not a timeout. The stall
+# floor stays 3 s, which is many frames even at 10 ms, so a live walk that
+# pops every frame is not flagged.
 WALK_CYCLE_FRAMES = 49
 _WALK_ACTIONS = {"forward", "backward", "turn_left", "turn_right", "trot"}
 
@@ -119,6 +127,7 @@ class Locomotion:
             log(f"patrol_disabled why={why}")
         self.enabled = False
         self.safety.walking.clear()
+        self.safety.walk_speed = None
 
     def resting(self) -> bool:
         return time.time() < self.rest_until
@@ -156,10 +165,18 @@ class Locomotion:
             return "halt", 0
         if c >= C.OBSTACLE_CLEAR_CM:
             return "forward", C.WALK_MAX_STEPS
+        stop = stop_cm_for_speed(C.WALK_SPEED)
+        # Don't step into the distance the monitor will trip on. At speed > 80
+        # that is the longer fast stop, so a 32 cm reading backs up.
+        if c < stop:
+            log(f"plan too_close C={c:.0f} stop={stop:.0f} -> backward")
+            return "backward", 1
         if c >= C.OBSTACLE_TURN_CM:
             return "forward", 1
-        if c < C.SAFETY_STOP_CM + 5:
-            log(f"plan too_close C={c:.0f} -> backward")
+        # The extra 5 cm only applies while it still leaves a gap under the
+        # turn threshold. A fast stop near 40 cm must not erase every turn.
+        if stop + 5 < C.OBSTACLE_TURN_CM and c < stop + 5:
+            log(f"plan too_close C={c:.0f} stop={stop:.0f} -> backward")
             return "backward", 1
         left, right = self._scan()
         side = "turn_left" if (left or 0) >= (right or 0) else "turn_right"
@@ -190,6 +207,9 @@ class Locomotion:
             # and never goes through plan().
             self.hw.level_head(0, 0, speed=40)
         if walking and action != "backward":
+            # Speed first, then the flag, so a 10 Hz tick never sees a walk
+            # with the previous move's speed.
+            self.safety.walk_speed = int(speed)
             self.safety.walking.set()   # monitor enforces stop distance (not while backing away)
         try:
             before = _buffer_len(dog)
@@ -240,6 +260,7 @@ class Locomotion:
             return False
         finally:
             self.safety.walking.clear()
+            self.safety.walk_speed = None
 
 
 def _buffer_len(dog) -> int:

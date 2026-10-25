@@ -24,8 +24,8 @@ def rig(make_hw, monkeypatch):
 @pytest.mark.parametrize(
     "cm, move, steps",
     [
-        (80, "forward", 2),
-        (60, "forward", 2),
+        (80, "forward", 4),
+        (60, "forward", 4),
         (45, "forward", 1),
         (40, "forward", 1),
         (20, "backward", 1),
@@ -48,6 +48,14 @@ def test_plan_turns_toward_the_open_side(rig):
     assert loco.plan() == ("turn_right", 2)
 
 
+def test_fast_walk_backs_up_inside_the_longer_stop(rig, monkeypatch):
+    hw, _mon, loco = rig
+    hw.dog.distance_by_yaw({0: 32, 35: 90, -35: 90})
+    assert loco.plan() == ("backward", 1)
+    monkeypatch.setattr(C, "WALK_SPEED", 65)
+    assert loco.plan() == ("turn_left", 2)
+
+
 def test_plan_backs_up_when_both_sides_are_blocked(rig):
     hw, _mon, loco = rig
     hw.dog.distance_by_yaw({0: 35, 35: 10, -35: 15})
@@ -57,7 +65,7 @@ def test_plan_backs_up_when_both_sides_are_blocked(rig):
 def test_plan_uses_a_single_good_reading(rig):
     hw, _mon, loco = rig
     hw.dog.distance.queue([None, 90, None])
-    assert loco.plan() == ("forward", 2)
+    assert loco.plan() == ("forward", 4)
 
 
 def test_plan_halts_and_trips_when_distance_is_missing(rig):
@@ -93,7 +101,7 @@ def test_plan_levels_the_ultrasonic(rig):
     """
     hw, _mon, loco = rig
     hw.dog.distance.set(100)
-    assert loco.plan() == ("forward", 2)
+    assert loco.plan() == ("forward", 4)
     assert hw.head["yaw"] == 0
     assert hw.head["pitch"] == hw.level_pitch(0) == -C.HEAD_PITCH_COMP
     assert hw.head["pitch"] != C.HEAD_PITCH_DEFAULT
@@ -146,16 +154,31 @@ def _servo_pitch(yaw, roll, pitch) -> float:
     return float(roll) * ratio + float(pitch) * (1.0 - ratio) + C.HEAD_PITCH_COMP
 
 
-def test_walk_uses_speed_65_and_respects_a_configured_80(rig, monkeypatch):
-    hw, _mon, loco = rig
-    assert C.WALK_SPEED == 65
+def test_walk_uses_default_speed_95_and_respects_an_override(rig, monkeypatch):
+    hw, mon, loco = rig
+    assert C.WALK_SPEED == 95
+    assert C.WALK_MAX_STEPS == 4
+    seen = {}
+    real_set = mon.walking.set
+
+    def wrapped():
+        seen["speed"] = mon.walk_speed
+        real_set()
+
+    mon.walking.set = wrapped
     hw.dog.distance.set(100)
     assert loco.tick() == "forward"
-    assert hw.dog.action_log[-1]["speed"] == 65
-    assert hw.dog.action_log[-1]["steps"] == C.WALK_MAX_STEPS == 2
+    assert hw.dog.action_log[-1]["speed"] == 95
+    assert hw.dog.action_log[-1]["steps"] == 4
+    assert seen["speed"] == 95
+    assert mon.walk_speed is None
+    assert not mon.walking.is_set()
     monkeypatch.setattr(C, "WALK_SPEED", 80)
     assert loco.tick() == "forward"
     assert hw.dog.action_log[-1]["speed"] == 80
+    monkeypatch.setattr(C, "WALK_SPEED", 98)
+    assert loco.tick() == "forward"
+    assert hw.dog.action_log[-1]["speed"] == 98
 
 
 def test_speed_hard_cap_and_grok_interval_floor(tmp_path):
@@ -167,7 +190,10 @@ def test_speed_hard_cap_and_grok_interval_floor(tmp_path):
         os.environ["HOME"] = {str(home)!r}
         os.environ["PIDOG_REX_WALK_SPEED"] = "100"
         import config
-        assert config.WALK_SPEED == 80, config.WALK_SPEED
+        assert config.WALK_SPEED == 98, config.WALK_SPEED
+        os.environ["PIDOG_REX_WALK_SPEED"] = "98"
+        importlib.reload(config)
+        assert config.WALK_SPEED == 98
         os.environ["PIDOG_REX_WALK_SPEED"] = "80"
         importlib.reload(config)
         assert config.WALK_SPEED == 80
@@ -176,7 +202,23 @@ def test_speed_hard_cap_and_grok_interval_floor(tmp_path):
         assert config.WALK_SPEED == 40
         os.environ.pop("PIDOG_REX_WALK_SPEED")
         importlib.reload(config)
-        assert config.WALK_SPEED == 65, config.WALK_SPEED
+        assert config.WALK_SPEED == 95, config.WALK_SPEED
+        os.environ["PIDOG_REX_WALK_STEPS"] = "100"
+        importlib.reload(config)
+        assert config.WALK_MAX_STEPS == 8, config.WALK_MAX_STEPS
+        os.environ["PIDOG_REX_WALK_STEPS"] = "4"
+        importlib.reload(config)
+        assert config.WALK_MAX_STEPS == 4
+        os.environ.pop("PIDOG_REX_WALK_STEPS")
+        importlib.reload(config)
+        assert config.WALK_MAX_STEPS == 4
+        os.environ["REX_FOLLOW_SPEED"] = "100"
+        importlib.reload(config)
+        assert config.FOLLOW_SPEED == 95, config.FOLLOW_SPEED
+        os.environ["PIDOG_REX_WALK_SPEED"] = "98"
+        os.environ["REX_FOLLOW_SPEED"] = "100"
+        importlib.reload(config)
+        assert config.FOLLOW_SPEED == 98, config.FOLLOW_SPEED
         os.environ["PIDOG_GROK_MIN_INTERVAL"] = "5"
         importlib.reload(config)
         assert config.GROK_MIN_INTERVAL == 60
@@ -236,8 +278,31 @@ def test_speed_65_walk_outlasts_the_old_fixed_deadline():
     assert leg_wait_budget(65, 2, expected_leg_frames("forward", 2)) > two
 
 
-@pytest.mark.parametrize("cm, steps", [(100, 2), (45, 1)])
-def test_walk_completes_when_frames_take_longer_than_the_old_deadline(make_hw, monkeypatch, capsys, cm, steps):
+@pytest.mark.parametrize("speed", [95, 98, 100])
+def test_high_speed_budget_is_longer_than_a_normal_walk(speed):
+    """The 10 ms frame floor must not make a finished gait look like a stall.
+
+    Budget stays above the nominal frame time (4x, or the 8+3*steps floor).
+    The stall timer stays at least 3 s and at least eight frames.
+    """
+    from locomotion import expected_leg_frames, leg_stall_seconds, leg_wait_budget, servo_frame_seconds
+    frame = servo_frame_seconds(speed)
+    assert frame >= 0.010
+    if speed >= 100:
+        assert frame == pytest.approx(0.010)
+    else:
+        assert frame == pytest.approx(max(0.010, (-9.9 * speed + 1000) / 1000))
+    for steps in (1, 4):
+        frames = expected_leg_frames("forward", steps)
+        nominal = frames * frame
+        assert leg_wait_budget(speed, steps, frames) > nominal
+        stall = leg_stall_seconds(speed)
+        assert stall >= 3.0
+        assert stall + 1e-9 >= frame * 8
+
+
+@pytest.mark.parametrize("cm, steps", [(100, 4), (45, 1)])
+def test_walk_completes_on_the_frame_clock(make_hw, monkeypatch, capsys, cm, steps):
     from locomotion import expected_leg_frames, servo_frame_seconds
     clock = sim.ManualClock(5_000.0)
     sim.configure(clock=clock, realistic_legs=True)
@@ -252,13 +317,13 @@ def test_walk_completes_when_frames_take_longer_than_the_old_deadline(make_hw, m
     assert loco.tick() == "forward"
     elapsed = clock.t - started
     frames = expected_leg_frames("forward", steps)
-    assert hw.dog.action_log[-1] == {"action": "forward", "steps": steps, "speed": 65}
+    assert hw.dog.action_log[-1] == {"action": "forward", "steps": steps, "speed": C.WALK_SPEED}
     assert len(hw.dog.legs_action_buffer) == 0
-    assert elapsed > 8 + 3 * steps
     # plan() samples the ultrasonic (5 reads, 4 gaps) before the leg frames run.
     from locomotion import DISTANCE_SAMPLES, DISTANCE_SAMPLE_GAP
     sampling = (DISTANCE_SAMPLES - 1) * DISTANCE_SAMPLE_GAP
-    assert elapsed == pytest.approx(frames * servo_frame_seconds(65) + sampling, abs=0.05)
+    nominal = frames * servo_frame_seconds(C.WALK_SPEED)
+    assert elapsed == pytest.approx(nominal + sampling, abs=0.05)
     assert hw.dog.legs_stop_calls == 0
     assert brain.memory()["stats"]["floor_moves"] == before + 1
     assert "walk timeout" not in capsys.readouterr().out
@@ -277,11 +342,13 @@ def test_stalled_leg_buffer_still_times_out(make_hw, monkeypatch, capsys):
     assert loco.enable("test")
     before = brain.memory()["stats"]["floor_moves"]
     assert loco.tick() == "aborted"
-    frames = expected_leg_frames("forward", 2)
-    full = frames * servo_frame_seconds(65)
-    assert clock.t > leg_stall_seconds(65)
+    steps = C.WALK_MAX_STEPS
+    frames = expected_leg_frames("forward", steps)
+    speed = C.WALK_SPEED
+    full = frames * servo_frame_seconds(speed)
+    assert clock.t > leg_stall_seconds(speed)
     assert clock.t < full
-    assert clock.t < leg_wait_budget(65, 2, frames)
+    assert clock.t < leg_wait_budget(speed, steps, frames)
     assert hw.dog.legs_stop_calls >= 1
     assert brain.memory()["stats"]["floor_moves"] == before
     assert "walk timeout -> legs_stop" in capsys.readouterr().out

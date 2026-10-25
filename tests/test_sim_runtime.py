@@ -140,6 +140,31 @@ def test_allow_no_imu_is_wired_through_run(monkeypatch, capsys):
     assert "patrol_enabled" in capsys.readouterr().out
 
 
+def test_patrol_does_not_wait_on_grok_between_moves(monkeypatch, capsys):
+    """A running patrol steps before any Grok call or shelf head sweep."""
+    calls = []
+    waits = []
+    monkeypatch.setattr(vision_grok.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr("locomotion.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(main._shutdown, "wait", lambda timeout=None: waits.append(timeout))
+
+    def analyze(*args, **kwargs):
+        calls.append(1)
+        return {"skipped": True, "reason": "test"}
+
+    monkeypatch.setattr(vision_grok, "analyze", analyze)
+    assert main.run(_args(patrol=True, seconds=0.15, force_first_grok=True)) == 0
+    dog = sim.dogs[-1]
+    forwards = [a for a in dog.action_log if a["action"] == "forward"]
+    assert forwards
+    assert all(a["steps"] == C.WALK_MAX_STEPS and a["speed"] == C.WALK_SPEED for a in forwards)
+    assert calls == []
+    assert waits and all(timeout == main._WALK_LOOP_WAIT for timeout in waits)
+    yaws = [cmd["frames"][-1][0] for cmd in dog.head_commands]
+    assert 35 not in yaws and -35 not in yaws
+    assert "patrol_enabled" in capsys.readouterr().out
+
+
 def test_main_loop_survives_api_errors(monkeypatch, capsys):
     _fast(monkeypatch)
     monkeypatch.setenv("XAI_API_KEY", "test-not-a-real-key")
