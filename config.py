@@ -112,9 +112,15 @@ STT_MODEL_PATH = Path(os.environ.get("PIDOG_STT_MODEL", str(Path.home() / ".loca
 STT_PYTHON = os.environ.get("PIDOG_STT_PYTHON", str(Path.home() / ".local/stt-venv/bin/python"))
 STT_MIN_PEAK = _i("PIDOG_STT_MIN_PEAK", 1200)
 
-# Locomotion (patrol) - conservative defaults; old PIDOG_PATROL_STEP_* knobs are ignored on purpose
-WALK_SPEED = min(80, _i("PIDOG_REX_WALK_SPEED", 65))
-WALK_MAX_STEPS = max(1, min(2, _i("PIDOG_REX_WALK_STEPS", 2)))
+# Locomotion (patrol). SunFounder's own forward/turn examples use about 98.
+# 100 sits on robot_hat's 10 ms servo-frame floor, so the cap stays at 98.
+# Old PIDOG_PATROL_STEP_* knobs are ignored on purpose.
+WALK_SPEED_CAP = 98
+WALK_SPEED = min(WALK_SPEED_CAP, _i("PIDOG_REX_WALK_SPEED", 95))
+# Clear-path steps per move. PIDOG_REX_WALK_STEPS can raise or lower it.
+# The ceiling keeps a typo from queuing a very long walk.
+WALK_STEPS_CAP = 8
+WALK_MAX_STEPS = max(1, min(WALK_STEPS_CAP, _i("PIDOG_REX_WALK_STEPS", 4)))
 PATROL_MAX_SECONDS = _f("PIDOG_REX_PATROL_SECONDS", 120)
 PATROL_REST_SECONDS = _f("PIDOG_REX_REST_SECONDS", 90)
 OBSTACLE_CLEAR_CM = _f("PIDOG_REX_CLEAR_CM", 60)
@@ -123,6 +129,13 @@ OBSTACLE_TURN_CM = _f("PIDOG_REX_TURN_CM", 40)
 # Safety
 SAFETY_POLL = 0.1
 SAFETY_STOP_CM = _f("PIDOG_REX_STOP_CM", 25)
+# Above this servo speed the dog covers more ground between 10 Hz polls, so
+# the obstacle stop grows to SAFETY_FAST_STOP_CM. It is never closer than
+# SAFETY_STOP_CM. Speed 80 itself keeps the base stop. The default stays under
+# OBSTACLE_TURN_CM (40) so a reading in between still turns instead of only
+# backing up. PIDOG_REX_FAST_STOP_CM can raise it further.
+SAFETY_FAST_SPEED = 80
+SAFETY_FAST_STOP_CM = _f("PIDOG_REX_FAST_STOP_CM", 35)
 SAFETY_TILT_DEG = _f("PIDOG_REX_TILT_DEG", 30)
 SAFETY_BATTERY_LOW_V = _f("PIDOG_REX_BATTERY_LOW_V", 6.6)
 SAFETY_EMPTY_READS = _i("PIDOG_REX_EMPTY_READS", 3)  # consecutive IMU failures, and the old read-count name

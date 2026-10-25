@@ -73,7 +73,10 @@ GitHub Actions runs it on Python 3.11.
 
 ## Safety
 - SafetyMonitor thread polls ~10 Hz, independent of the main loop. It trips on: obstacle < 25 cm
-  (instant, on any valid echo) or about 1 s with no valid ultrasonic reading while walking
+  (instant, on any valid echo). Above walk speed 80 the stop is `PIDOG_REX_FAST_STOP_CM` (default
+  35 cm, kept under the 40 cm turn distance) and never closer than 25 cm, so a faster gait still
+  stops on a valid close reading. About
+  1 s with no valid ultrasonic reading while walking also trips
   (`PIDOG_REX_EMPTY_SECONDS`, or `REX_EMPTY_SECONDS` when that is unset; floor 0.2 s). The trip line
   includes how many reads were empty. A brief `None` from gait vibration does not trip. Tilt > 30 deg
   from the pose at startup, repeated IMU read failures, a frozen IMU that repeats the same raw
@@ -85,7 +88,10 @@ GitHub Actions runs it on Python 3.11.
   pidog's own pitch/roll are not used: its calibration forces the boot pose to `ax=-16384`, which is
   wrong when gravity is on Y/Z, and a real tilt then stays under 30 deg. `python3 sensorcheck.py --imu`
   prints the live angle for a hand test.
-- Walking defaults: speed 65, 1-2 steps per move, 120 s patrol cap then rest. Before a step Rex takes
+- Walking defaults: speed 95 (cap 98, `PIDOG_REX_WALK_SPEED`; SunFounder examples use about 98),
+  4 steps on a clear path (`PIDOG_REX_WALK_STEPS`, ceiling 8), 120 s patrol cap then rest. While a
+  patrol or follow step is in progress the loop does not sweep the head or wait on Grok, and it
+  yields 50 ms instead of 500 ms. Before a step Rex takes
   up to 5 distance reads about 60 ms apart and uses the median of the valid ones, so one empty echo
   does not halt the patrol. No valid echo in that sample still trips, and the trip line includes the
   empty count. The head is leveled for the step: the shelf pitch (18, with pitch_comp -15) is slightly

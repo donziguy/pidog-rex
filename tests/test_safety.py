@@ -16,6 +16,8 @@ from support import assert_halted, run_py
 
 def test_documented_safety_defaults():
     assert C.SAFETY_STOP_CM == 25
+    assert C.SAFETY_FAST_SPEED == 80
+    assert C.SAFETY_FAST_STOP_CM == 35
     assert C.SAFETY_TILT_DEG == 30
     assert C.SAFETY_BATTERY_LOW_V == 6.6
     assert C.SAFETY_EMPTY_READS == 3
@@ -40,6 +42,58 @@ def test_obstacle_under_25cm_while_walking(make_hw):
     assert mon.reason == "obstacle 15cm"
     chest = [event for event in hw.dog.events if event[0] == "chest"][-1]
     assert chest[1:] == ("boom", "#ff00ff", 1, 0.6)
+
+
+def test_fast_walk_stops_farther_and_tilt_still_trips(make_hw):
+    from safety import stop_cm_for_speed
+    assert stop_cm_for_speed(None) == 25
+    assert stop_cm_for_speed(50) == 25
+    assert stop_cm_for_speed(80) == 25
+    assert stop_cm_for_speed(95) == 35
+    assert stop_cm_for_speed(98) == 35
+    hw = make_hw()
+    mon = _monitor(hw)
+    mon.walking.set()
+    mon.walk_speed = 95
+    hw.dog.distance.set(30)  # past 25 cm, inside the fast stop
+    mon._tick()
+    assert_halted(mon, hw.dog)
+    assert mon.reason == "obstacle 30cm"
+
+    mon.reset("test")
+    mon.walking.set()
+    mon.walk_speed = 95
+    hw.dog.distance.set(35)  # not under the fast stop
+    mon._tick()
+    assert not mon.locked.is_set()
+
+    mon.walk_speed = 80  # the threshold itself keeps the 25 cm stop
+    hw.dog.distance.set(30)
+    mon._tick()
+    assert not mon.locked.is_set()
+    mon.walk_speed = None
+    hw.dog.distance.set(24)
+    mon._tick()
+    assert_halted(mon, hw.dog)
+    assert mon.reason == "obstacle 24cm"
+
+    mon.reset("test")
+    mon.walking.set()
+    mon.walk_speed = 98
+    hw.dog.distance.set(100)
+    hw.dog.pitch = 31
+    mon._tick()
+    assert_halted(mon, hw.dog)
+    assert "tilt" in mon.reason
+
+
+def test_fast_stop_cannot_be_closer_than_the_base(monkeypatch):
+    from safety import stop_cm_for_speed
+    monkeypatch.setattr(C, "SAFETY_FAST_STOP_CM", 10)
+    assert stop_cm_for_speed(95) == C.SAFETY_STOP_CM
+    monkeypatch.setattr(C, "SAFETY_FAST_STOP_CM", 55)
+    assert stop_cm_for_speed(95) == 55
+    assert stop_cm_for_speed(40) == C.SAFETY_STOP_CM
 
 
 def test_obstacle_while_idle_does_not_trip(make_hw):

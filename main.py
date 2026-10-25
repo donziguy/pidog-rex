@@ -19,6 +19,11 @@ from dashboard import Dashboard
 _shutdown = abort.event
 _sig_count = 0
 _bits = {"hw": None, "loco": None, "in_shutdown": False}
+# Shelf duty pauses so a look and a Grok call can finish. While the legs are
+# stepping, only yield long enough for the 10 Hz safety thread. A Grok call
+# (up to GROK_TIMEOUT) must not sit between patrol moves.
+_IDLE_LOOP_WAIT = 0.5
+_WALK_LOOP_WAIT = 0.05
 
 
 class Session:
@@ -191,52 +196,62 @@ def run(args) -> int:
             # 2) shelf touch = pet (safety handles touch while walking)
             if not loco.enabled and safety.last.get("touch", "N") != "N":
                 audio.sfx("happy", tts); hw.wag(4, 50); brain.remember("pet", safety.last["touch"])
-            # 3) look around / track sound
-            yaw, label = positions[i % 3]; i += 1
-            d = hw.sound_direction() if C.SOUND_TRACKING else None
-            if d is not None:
-                hw.head_pan(hw.sound_to_pan(d)); brain.bump("sound_events"); brain.adjust_mood(event="sound")
-                label = f"sound{d}"
-            else:
-                hw.move_head(yaw, 0, None, speed=30)
-            hw.chest("listening")
-            # 4) vision (Grok only on real change, >=60 s apart)
-            photo = hw.photo()
-            if face_mod is not None and C.FACE_ENABLED:
-                face_mod.observe(session, photo)
-            if session.guard is not None:
-                session.guard.tick(photo, session.face_hits)
-            if session.follow is not None and session.follow.active and not session.face_hits and face_mod is not None:
-                session.face_hits = face_mod.recognize_hw(hw, photo=photo)
-            if photo and not _shutdown.is_set():
-                force = args.force_first_grok and grok_calls == 0
-                hw.chest("analyzing")
-                a = vision_grok.analyze(photo, force=force)
-                if _shutdown.is_set():
-                    pass
-                elif not a.get("skipped"):
-                    grok_calls += a.get("_source") == "grok"
-                    brain.update_from_vision(a)
-                    gesture(hw, brain.gesture_for(a), tts)
-                    if brain.should_speak(a, bool(a.get("_changed"))):
-                        hw.chest("talking"); audio.speak(a["roast"], tts)
-                        brain.bump("roasts_spoken"); brain.remember("roast", a["roast"]); brain.adjust_mood(event="roast_spoken")
-                elif brain.mutter_due() and not loco.enabled and not _shutdown.is_set():
-                    audio.speak(brain.idle_mutter(brain.memory().get("last_scene_summary") or "boring shelf duty"), tts)
-            hw.chest("locked" if safety.locked.is_set() else "idle")
-            # 5) walking (only if enabled and safety allows). Follow replaces patrol wander.
-            if _shutdown.is_set():
-                break
-            if session.follow is not None and session.follow.active:
-                session.follow.tick(session.face_hits)
-            elif loco.enabled:
+            # Follow replaces patrol wander. Either one steps before the shelf
+            # look, so a Grok call and the head sweep cannot pause the gait.
+            # Patrol is not started from here; this only runs a session that
+            # --patrol or "rex patrol" already enabled. Rest still looks around.
+            follow_on = session.follow is not None and session.follow.active
+            patrol_on = loco.enabled and not loco.resting()
+            if follow_on:
+                photo = hw.photo()
+                if face_mod is not None and C.FACE_ENABLED:
+                    face_mod.observe(session, photo)
+                if not session.face_hits and face_mod is not None:
+                    session.face_hits = face_mod.recognize_hw(hw, photo=photo)
+                if not _shutdown.is_set():
+                    session.follow.tick(session.face_hits)
+            elif patrol_on:
                 for _ in range(2):
+                    if _shutdown.is_set():
+                        break
                     r = loco.tick()
                     if r in ("off", "locked", "halt", "resting", "rest", "aborted"):
                         break
+            else:
+                # 3) look around / track sound
+                yaw, label = positions[i % 3]; i += 1
+                d = hw.sound_direction() if C.SOUND_TRACKING else None
+                if d is not None:
+                    hw.head_pan(hw.sound_to_pan(d)); brain.bump("sound_events"); brain.adjust_mood(event="sound")
+                    label = f"sound{d}"
+                else:
+                    hw.move_head(yaw, 0, None, speed=30)
+                hw.chest("listening")
+                # 4) vision (Grok only on real change, >=60 s apart)
+                photo = hw.photo()
+                if face_mod is not None and C.FACE_ENABLED:
+                    face_mod.observe(session, photo)
+                if session.guard is not None:
+                    session.guard.tick(photo, session.face_hits)
+                if photo and not _shutdown.is_set():
+                    force = args.force_first_grok and grok_calls == 0
+                    hw.chest("analyzing")
+                    a = vision_grok.analyze(photo, force=force)
+                    if _shutdown.is_set():
+                        pass
+                    elif not a.get("skipped"):
+                        grok_calls += a.get("_source") == "grok"
+                        brain.update_from_vision(a)
+                        gesture(hw, brain.gesture_for(a), tts)
+                        if brain.should_speak(a, bool(a.get("_changed"))):
+                            hw.chest("talking"); audio.speak(a["roast"], tts)
+                            brain.bump("roasts_spoken"); brain.remember("roast", a["roast"]); brain.adjust_mood(event="roast_spoken")
+                    elif brain.mutter_due() and not loco.enabled and not _shutdown.is_set():
+                        audio.speak(brain.idle_mutter(brain.memory().get("last_scene_summary") or "boring shelf duty"), tts)
+            hw.chest("locked" if safety.locked.is_set() else "idle")
             if session.mqtt is not None:
                 session.mqtt.publish_state()
-            _shutdown.wait(0.5)
+            _shutdown.wait(_WALK_LOOP_WAIT if (follow_on or patrol_on) else _IDLE_LOOP_WAIT)
         log(f"main_loop_exit grok_calls={grok_calls} safety_ticks={safety.ticks} locked={safety.locked.is_set()} reason={safety.reason}")
         return 0
     except Exception:

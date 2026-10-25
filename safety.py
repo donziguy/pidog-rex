@@ -1,7 +1,10 @@
 """SafetyMonitor: independent 10 Hz watchdog that can stop the legs and lock out movement.
 
 Triggers (any one):
-  * ultrasonic < SAFETY_STOP_CM while walking (instant, on any valid reading)
+  * ultrasonic under the stop distance while walking (instant, on any valid
+    reading). The base is SAFETY_STOP_CM. When the current move is faster than
+    SAFETY_FAST_SPEED, the stop is SAFETY_FAST_STOP_CM and never closer than
+    the base. Tilt does not change with speed.
   * no valid ultrasonic reading for SAFETY_EMPTY_SECONDS while walking
     (about 1 s; PIDOG_REX_EMPTY_SECONDS or REX_EMPTY_SECONDS). A brief gap
     from gait vibration does not trip. The trip line includes the empty count.
@@ -28,12 +31,31 @@ from config import log
 import brain
 
 
+def stop_cm_for_speed(speed) -> float:
+    """Obstacle stop for the move that is running now.
+
+    Base is SAFETY_STOP_CM. Speeds above SAFETY_FAST_SPEED use
+    SAFETY_FAST_STOP_CM, and never a value closer than the base, so a low
+    PIDOG_REX_FAST_STOP_CM cannot weaken the 25 cm stop. An unknown speed
+    (shelf, or a walk that has not published one) keeps the base.
+    """
+    base = float(C.SAFETY_STOP_CM)
+    try:
+        fast = float(speed) > float(C.SAFETY_FAST_SPEED)
+    except (TypeError, ValueError):
+        fast = False
+    if not fast:
+        return base
+    return max(base, float(C.SAFETY_FAST_STOP_CM))
+
+
 class SafetyMonitor(threading.Thread):
     def __init__(self, hw, allow_no_imu: bool = False):
         super().__init__(name="safety", daemon=True)
         self.hw = hw
         self.allow_no_imu = bool(allow_no_imu)
         self.walking = threading.Event()      # set by Locomotion while legs may move
+        self.walk_speed = None                 # speed of that move; None keeps the base stop
         self.locked = threading.Event()
         self.reason = ""
         self._halt = threading.Event()  # not named _stop: that shadows Thread._stop and breaks join()
@@ -80,7 +102,11 @@ class SafetyMonitor(threading.Thread):
         self._halt.set()
 
     def run(self) -> None:
-        log(f"safety_monitor_start poll={C.SAFETY_POLL}s stop_cm={C.SAFETY_STOP_CM} tilt={C.SAFETY_TILT_DEG} batt_low={C.SAFETY_BATTERY_LOW_V}")
+        log(
+            f"safety_monitor_start poll={C.SAFETY_POLL}s stop_cm={C.SAFETY_STOP_CM} "
+            f"fast_stop_cm={C.SAFETY_FAST_STOP_CM} above_speed={C.SAFETY_FAST_SPEED} "
+            f"tilt={C.SAFETY_TILT_DEG} batt_low={C.SAFETY_BATTERY_LOW_V}"
+        )
         while not self._halt.is_set():
             try:
                 self._tick()
@@ -119,7 +145,8 @@ class SafetyMonitor(threading.Thread):
             else:
                 self._empty = 0
                 self._empty_since = None
-                if d < C.SAFETY_STOP_CM:
+                stop = stop_cm_for_speed(self.walk_speed)
+                if d < stop:
                     self.trip(f"obstacle {d:.0f}cm")
             if t != "N":
                 self.trip(f"head_touch {t}")
