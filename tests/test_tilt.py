@@ -496,6 +496,73 @@ def test_allow_no_imu_still_trips_a_live_tilt(make_hw, capsys):
     assert "imu_stale_overridden" not in capsys.readouterr().out
 
 
+def test_sit_posture_does_not_trip_and_a_real_tip_still_does(make_hw, capsys):
+    """Sit is about 30 deg of pitch on Rex's mount. That pose is not a fall.
+
+    A 33 deg tip while standing still still trips. So does a further rotation
+    off the sit attitude, and a collapse past the posture ceiling mid-move.
+    """
+    sim.configure(imu_mount=_MOUNTS["yz"])
+    hw = make_hw()
+    mon = SafetyMonitor(hw)
+    hw.dog.roll = 0
+
+    hw.dog.pitch = 33
+    hw.begin_posture("sit")
+    mon._tick()
+    assert hw.tilt_deg == pytest.approx(33.0, abs=0.2)
+    assert hw.tilt_deg > C.SAFETY_TILT_DEG
+    assert not mon.locked.is_set()
+    hw.dog.pitch = 30.5
+    hw.end_posture("sit")
+    mon._tick()
+    assert hw.body_pose == "sit"
+    assert hw.tilt_deg == pytest.approx(30.5, abs=0.2)
+    assert hw.tilt_deg > C.SAFETY_TILT_DEG
+    assert not mon.locked.is_set()
+    assert "tilt_pose_held" in capsys.readouterr().out
+
+    ref = hw.pose_reference
+    assert ref is not None
+    tipped = _rotate(ref, _axes(ref)[3], 33)
+    hw.dog.imu_raw.set(tipped)
+    mon._tick()
+    assert_halted(mon, hw.dog)
+    assert mon.reason.startswith("tilt ")
+
+    mon.reset("test")
+    hw.dog.imu_raw.set(None)
+    hw.dog.pitch = 30.5
+    hw.dog.roll = 0
+    hw.begin_posture("sit")
+    hw.end_posture("sit")
+    hw.begin_gait()
+    assert hw.body_pose == "recovering"
+    mon._tick()
+    assert not mon.locked.is_set()
+    hw.dog.pitch = 10  # stood up, inside the clear line
+    mon._tick()
+    assert hw.body_pose == "upright"
+    assert not mon.locked.is_set()
+    hw.dog.pitch = 33
+    mon._tick()
+    assert_halted(mon, hw.dog)
+    assert "pitch=33" in mon.reason
+
+
+def test_posture_motion_still_trips_a_collapse(make_hw):
+    sim.configure(imu_mount=_MOUNTS["yz"])
+    hw = make_hw()
+    mon = SafetyMonitor(hw)
+    hw.dog.pitch = 56
+    hw.begin_posture("stand")
+    mon._tick()
+    assert hw.tilt_deg == pytest.approx(56.0, abs=0.3)
+    assert hw.tilt_deg > C.SAFETY_POSTURE_TILT_DEG
+    assert_halted(mon, hw.dog)
+    assert "pitch=56" in mon.reason
+
+
 def test_allow_no_imu_help_mentions_a_frozen_imu():
     import main
     text = main.build_parser().format_help()

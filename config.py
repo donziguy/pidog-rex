@@ -63,6 +63,40 @@ def _f(name, default):
         return float(default)
 
 
+def _optional_float(name: str) -> float | None:
+    """A set env value, or None when it is missing, blank, or not a number."""
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def resolve_base_stop() -> tuple[float, str, float | None]:
+    """Base obstacle stop, which setting won, and a legacy value that lost.
+
+    Precedence:
+      1. ``PIDOG_REX_STOP_CM`` when it is set. This is the canonical knob.
+      2. ``PIDOG_OBSTACLE_STOP_CM`` when that is the only one set. Older
+         ``security_dog.env`` files use this name.
+      3. 25 cm.
+
+    Speeds above ``SAFETY_FAST_SPEED`` do not stop at this distance. They use
+    ``PIDOG_REX_FAST_STOP_CM``, and never a value closer than this base.
+    ``stop_cm_for_speed`` is what patrol actually enforces.
+    """
+    rex = _optional_float("PIDOG_REX_STOP_CM")
+    legacy = _optional_float("PIDOG_OBSTACLE_STOP_CM")
+    if rex is not None:
+        ignored = legacy if legacy is not None and legacy != rex else None
+        return rex, "PIDOG_REX_STOP_CM", ignored
+    if legacy is not None:
+        return legacy, "PIDOG_OBSTACLE_STOP_CM", None
+    return 25.0, "default", None
+
+
 def _i(name, default):
     return int(_f(name, default))
 
@@ -128,15 +162,25 @@ OBSTACLE_TURN_CM = _f("PIDOG_REX_TURN_CM", 40)
 
 # Safety
 SAFETY_POLL = 0.1
-SAFETY_STOP_CM = _f("PIDOG_REX_STOP_CM", 25)
+# See resolve_base_stop. PIDOG_REX_STOP_CM wins over PIDOG_OBSTACLE_STOP_CM.
+SAFETY_STOP_CM, SAFETY_STOP_SOURCE, SAFETY_STOP_IGNORED = resolve_base_stop()
 # Above this servo speed the dog covers more ground between 10 Hz polls, so
 # the obstacle stop grows to SAFETY_FAST_STOP_CM. It is never closer than
-# SAFETY_STOP_CM. Speed 80 itself keeps the base stop. The default stays under
+# SAFETY_STOP_CM. Speed 80 itself keeps the base stop. The default walk is 95
+# and the cap is 98, so both use the fast stop. The default stays under
 # OBSTACLE_TURN_CM (40) so a reading in between still turns instead of only
 # backing up. PIDOG_REX_FAST_STOP_CM can raise it further.
 SAFETY_FAST_SPEED = 80
 SAFETY_FAST_STOP_CM = _f("PIDOG_REX_FAST_STOP_CM", 35)
 SAFETY_TILT_DEG = _f("PIDOG_REX_TILT_DEG", 30)
+# Sit holds the torso near 30 deg, so a posture move may cross SAFETY_TILT_DEG.
+# Past this the body has fallen, including halfway through sit or stand.
+SAFETY_POSTURE_TILT_DEG = max(50.0, SAFETY_TILT_DEG + 20.0)
+# Stand-up out of sit stays exempt until the body is this close to level.
+# 20 deg when the limit is 30: under the sit attitude, above a normal walk.
+SAFETY_RECOVER_CLEAR_DEG = max(10.0, SAFETY_TILT_DEG - 10.0)
+# A rise of this many degrees above the pose just left is a fall, not a stand-up.
+SAFETY_RECOVER_MARGIN = 8.0
 SAFETY_BATTERY_LOW_V = _f("PIDOG_REX_BATTERY_LOW_V", 6.6)
 SAFETY_EMPTY_READS = _i("PIDOG_REX_EMPTY_READS", 3)  # consecutive IMU failures, and the old read-count name
 
@@ -153,11 +197,19 @@ def _first_float(names, default):
     return float(default)
 
 
-# How long the ultrasonic may return nothing while the legs are moving before
-# it counts as a dead sensor. A real obstacle (any valid read under the stop
-# distance) still trips on that single sample. PIDOG_REX_EMPTY_SECONDS wins
-# when both are set.
+# How long the ultrasonic may return nothing while a step is in progress
+# before the legs stop and patrol holds in place. A real obstacle (any valid
+# read under the stop distance) still trips on that single sample. The hold
+# becomes a lock at SAFETY_DISTANCE_HOLD_SECONDS. PIDOG_REX_EMPTY_SECONDS wins
+# when both empty-second names are set.
 SAFETY_EMPTY_SECONDS = max(0.2, _first_float(("PIDOG_REX_EMPTY_SECONDS", "REX_EMPTY_SECONDS"), 1.0))
+# How long the ranger may stay silent, counting from the first empty read,
+# before that silence locks movement. The legs already stop at
+# SAFETY_EMPTY_SECONDS and wait here for an echo. A reading in the window
+# resumes patrol. Never shorter than the pause, so a low setting cannot skip
+# the hold. PIDOG_REX_DISTANCE_HOLD_SECONDS.
+_HOLD_SECONDS = _first_float(("PIDOG_REX_DISTANCE_HOLD_SECONDS",), 5.0)
+SAFETY_DISTANCE_HOLD_SECONDS = max(SAFETY_EMPTY_SECONDS, _HOLD_SECONDS)
 
 # Web dashboard. Off unless REX_DASH=1, and it refuses to listen without a token.
 DASH_ENABLED = _b("REX_DASH", False)

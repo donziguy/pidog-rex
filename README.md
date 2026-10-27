@@ -72,29 +72,46 @@ The suite stubs Grok, Ollama, and TTS/STT subprocesses. It does not use the netw
 GitHub Actions runs it on Python 3.11.
 
 ## Safety
-- SafetyMonitor thread polls ~10 Hz, independent of the main loop. It trips on: obstacle < 25 cm
-  (instant, on any valid echo). Above walk speed 80 the stop is `PIDOG_REX_FAST_STOP_CM` (default
-  35 cm, kept under the 40 cm turn distance) and never closer than 25 cm, so a faster gait still
-  stops on a valid close reading. About
-  1 s with no valid ultrasonic reading while walking also trips
-  (`PIDOG_REX_EMPTY_SECONDS`, or `REX_EMPTY_SECONDS` when that is unset; floor 0.2 s). The trip line
-  includes how many reads were empty. A brief `None` from gait vibration does not trip. Tilt > 30 deg
-  from the pose at startup, repeated IMU read failures, a frozen IMU that repeats the same raw
-  acceleration (`imu_stale`), battery < 6.6 V for 3 s, head touch while walking, or the voice command
-  "stop" also trip. A trip clears the leg queue, lies down, and locks out movement until restart or
+- SafetyMonitor thread polls ~10 Hz, independent of the main loop. It trips on an obstacle closer
+  than the stop distance (instant, on any valid echo). The base stop is `PIDOG_REX_STOP_CM`
+  (default 25). If that is unset, the legacy name `PIDOG_OBSTACLE_STOP_CM` is the base. If both
+  are set, `PIDOG_REX_STOP_CM` wins and the log says the legacy value was ignored. Above walk
+  speed 80 the stop is `max(base, PIDOG_REX_FAST_STOP_CM)` (fast default 35 cm, kept under the
+  40 cm turn distance), so the default gait of 95 and the cap of 98 both stop at 35 cm unless
+  the base is already farther. Speed 80 itself keeps the base. Patrol start logs
+  `effective_stop_cm` for the speed in use, next to the base, the source, and the fast stop.
+  The old `stop_cm=25` line was only the base and hid the fast stop.
+- About 1 s with no valid ultrasonic reading while a step is in progress
+  (`PIDOG_REX_EMPTY_SECONDS`, or `REX_EMPTY_SECONDS` when that is unset; floor 0.2 s) stops the
+  legs and holds in place. It does not lock patrol. A reading before
+  `PIDOG_REX_DISTANCE_HOLD_SECONDS` (default 5 s, never shorter than the pause) resumes the walk.
+  Silence through that window trips, and the trip line includes how many reads were empty. A
+  brief `None` from gait vibration does not even pause. The same hold applies before a step:
+  no echo means stand still and retry, not an immediate lock.
+- Tilt over 30 deg while walking or standing still trips. Tilt is the angle between the current
+  raw accelerometer vector and a baseline averaged at startup. A commanded pose does not: sit
+  holds the torso near 30 deg (a sit has been logged at pitch 29 deg / tilt 30 deg) and that
+  posture, plus the stand-up out of it, is not a tip. A further tip off the sit, or any tip once
+  the body is upright again, still trips. Past 50 deg the body has fallen even mid-pose. Repeated
+  IMU read failures, a frozen IMU that repeats the same raw acceleration (`imu_stale`), battery
+  under 6.6 V for 3 plausible samples, head touch while walking, or the voice command "stop" also
+  trip. A trip clears the leg queue, lies down, and locks out movement until restart or
   "rex patrol". `--allow-no-imu` does not disable those stops for a live chip. It only skips the
   frozen-chip trip (see below).
-- Tilt is the angle between the current raw accelerometer vector and a baseline averaged at startup.
-  pidog's own pitch/roll are not used: its calibration forces the boot pose to `ax=-16384`, which is
-  wrong when gravity is on Y/Z, and a real tilt then stays under 30 deg. `python3 sensorcheck.py --imu`
-  prints the live angle for a hand test.
+- Battery reads of 0.0 V, and anything outside a 2S pack (at or below 3.0 V, or above 9.2 V),
+  are dropped. They are not logged as the voltage, they do not trip the low-battery stop, and
+  they do not clear a low streak that is already building. The reported voltage is the median
+  of the last 3 plausible samples. Three real readings under 6.6 V still trip.
+- Tilt uses Rex's own mount compensation. pidog's pitch/roll are not the trip: its calibration
+  forces the boot pose to `ax=-16384`, which is wrong when gravity is on Y/Z, and a real tilt
+  then stays under 30 deg. `python3 sensorcheck.py --imu` prints the live angle for a hand test.
 - Walking defaults: speed 95 (cap 98, `PIDOG_REX_WALK_SPEED`; SunFounder examples use about 98),
   4 steps on a clear path (`PIDOG_REX_WALK_STEPS`, ceiling 8), 120 s patrol cap then rest. While a
   patrol or follow step is in progress the loop does not sweep the head or wait on Grok, and it
   yields 50 ms instead of 500 ms. Before a step Rex takes
   up to 5 distance reads about 60 ms apart and uses the median of the valid ones, so one empty echo
-  does not halt the patrol. No valid echo in that sample still trips, and the trip line includes the
-  empty count. The head is leveled for the step: the shelf pitch (18, with pitch_comp -15) is slightly
+  does not halt the patrol. No valid echo in that sample holds and retries, as above. The head is
+  leveled for the step: the shelf pitch (18, with pitch_comp -15) is slightly
   up at yaw 0 and nose-down at the look-around yaw of ±35, which points the ultrasonic at the floor.
 - Grok is called only on a real scene change (32x24 grayscale thumbnail diff), at least 60 s apart, with
   320 px images, retries with backoff, Ollama fallback. API failures never crash the loop; responses are

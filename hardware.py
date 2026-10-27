@@ -27,6 +27,14 @@ def _sim_enabled() -> bool:
 _ACCEL_MIN_COUNTS = 50.0
 _I = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
 
+# Poses that pitch the torso. Sit is about 30 deg, which is the tilt limit, so
+# the angle against the boot baseline is not a fall while one of these is held.
+# lie and stand return the body near level. They are transitions, not holds.
+PITCHED_POSES = frozenset({
+    "sit", "half_sit", "stretch", "push_up", "lie_with_hands_out", "doze_off",
+})
+POSTURE_ACTIONS = PITCHED_POSES | frozenset({"lie", "stand"})
+
 
 def _dot(a, b) -> float:
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
@@ -215,6 +223,7 @@ class TiltTracker:
         self._same = 0
         self.exempt = False  # sim stays exempt unless a test opts in
         self.last = (0.0, 0.0)
+        self.last_raw = None
 
     def capture(self, read, samples: int = 10, gap: float = 0.0) -> bool:
         vecs = []
@@ -232,6 +241,7 @@ class TiltTracker:
         self.fail_streak = 0
         self.tilt_deg = 0.0
         self.last = (0.0, 0.0)
+        self.last_raw = self.baseline
         keys = [_counts(v) for v in vecs]
         self._last_key = keys[-1]
         run = 1
@@ -272,6 +282,7 @@ class TiltTracker:
         if raw is None or self.baseline is None or _norm(raw) < _ACCEL_MIN_COUNTS:
             self.fail_streak += 1
             return self.last
+        self.last_raw = (float(raw[0]), float(raw[1]), float(raw[2]))
         if self._observe(raw):
             # Same as a missed read: keep the last real sample and let the
             # safety streak reach SAFETY_EMPTY_READS.
@@ -312,6 +323,15 @@ class Hardware:
         self.imu_stale = False
         self._stale_override_logged = False
         self.tilt_baseline = None
+        # boot: the startup lie. upright / recovering / a pose name after that.
+        # pose_motion is a sit/lie/stand (etc.) that has not settled yet.
+        # pose_reference is the gravity vector of a settled pitched pose.
+        # recover_from is the boot-baseline tilt when a walk leaves that pose.
+        self.body_pose = "boot"
+        self.pose_motion = False
+        self.pose_reference = None
+        self.recover_from = None
+        self.last_raw_accel = None
         if self.imu_ok:
             # The dog is still in the boot lie pose. Average a handful of raw
             # samples so one noisy read does not become the "level" reference.
@@ -321,9 +341,53 @@ class Hardware:
                 self.imu_stale = self._tilt.stale
                 b = self.tilt_baseline
                 log(f"tilt_baseline samples={self._tilt.sample_count} ax={b[0]:.0f} ay={b[1]:.0f} az={b[2]:.0f}")
+                self.last_raw_accel = self._tilt.last_raw
             else:
                 log("tilt_baseline_failed (IMU reads unavailable; repeated failures trip safety)")
         log(f"pidog_init_ok imu_ok={self.imu_ok}")
+
+    def begin_posture(self, name: str) -> None:
+        """A commanded pose is moving. The boot-baseline angle is not a tip yet."""
+        self.pose_motion = True
+        self.body_pose = str(name)
+        self.pose_reference = None
+        self.recover_from = None
+
+    def end_posture(self, name: str) -> None:
+        """The pose has settled. Snapshot gravity so a held sit is not a fall."""
+        try:
+            self.tilt()
+        except Exception:
+            pass
+        raw = self.last_raw_accel
+        if raw is not None:
+            self.pose_reference = (float(raw[0]), float(raw[1]), float(raw[2]))
+        self.body_pose = str(name)
+        self.pose_motion = False
+        self.recover_from = None
+        log(f"posture_settled pose={name} tilt={self.tilt_deg:.1f}")
+
+    def cancel_posture(self) -> None:
+        """The pose did not finish. Keep guarding until the body is upright again."""
+        self.pose_motion = False
+        if self.body_pose in PITCHED_POSES:
+            self.recover_from = float(self.tilt_deg)
+            self.body_pose = "recovering"
+            log(f"posture_cancelled pose=recovering from_tilt={self.tilt_deg:.1f}")
+            return
+        log(f"posture_cancelled pose={self.body_pose}")
+
+    def begin_gait(self) -> None:
+        """A walk step. Standing up out of sit is not a tip; an upright tip still is."""
+        self.pose_motion = False
+        if self.body_pose in PITCHED_POSES or self.body_pose == "recovering":
+            if self.body_pose != "recovering":
+                self.recover_from = float(self.tilt_deg)
+            self.body_pose = "recovering"
+            return
+        self.body_pose = "upright"
+        self.pose_reference = None
+        self.recover_from = None
 
     # ---- sensors -------------------------------------------------------
     def distance(self) -> float | None:
@@ -358,6 +422,7 @@ class Hardware:
         self.tilt_deg = self._tilt.tilt_deg
         self.imu_fail_streak = self._tilt.fail_streak
         self.imu_stale = self._tilt.stale
+        self.last_raw_accel = self._tilt.last_raw
         return pitch, roll
 
     def note_stale_override(self) -> None:
@@ -476,10 +541,14 @@ class Hardware:
             log(f"legs_stop_error={exc}")
 
     def lie_down(self, speed=60) -> None:
+        # The lie path can pitch the body. That transition is not a tip.
+        self.begin_posture("lie")
         try:
             self.dog.stop_and_lie(speed=speed)
         except Exception as exc:
             log(f"lie_down_error={exc}")
+        finally:
+            self.end_posture("lie")
 
     # ---- camera -----------------------------------------------------------
     def photo(self) -> Path | None:
