@@ -68,12 +68,35 @@ def test_plan_uses_a_single_good_reading(rig):
     assert loco.plan() == ("forward", 4)
 
 
-def test_plan_halts_and_trips_when_distance_is_missing(rig):
+def test_plan_holds_when_distance_is_missing_then_resumes(rig, monkeypatch):
+    """No echo before a step stands still. A later echo walks. Silence locks."""
+    clock = sim.ManualClock(0.0)
+    monkeypatch.setattr("safety.time.time", clock.time)
     hw, mon, loco = rig
     hw.dog.distance.set(None)
-    assert loco.plan() == ("halt", 0)
+    assert loco.tick() == "hold"
+    assert mon.distance_hold is True
+    assert not mon.locked.is_set()
+    assert hw.dog.lie_calls == 0
+    assert not any(a["action"] == "forward" for a in hw.dog.action_log)
+    assert loco.enabled is True
+    hw.dog.distance.set(100)
+    assert loco.tick() == "forward"
+    assert mon.distance_hold is False
+    assert not mon.locked.is_set()
+
+    hw.dog.distance.set(None)
+    assert loco.tick() == "hold"
+    clock.advance(C.SAFETY_DISTANCE_HOLD_SECONDS - 0.1)
+    assert loco.tick() == "hold"
+    assert not mon.locked.is_set()
+    clock.advance(0.1)
+    assert loco.tick() == "halt"
     assert_halted(mon, hw.dog)
-    assert mon.reason == "distance_empty_before_move empty=5"
+    assert mon.reason.startswith("distance_empty")
+    assert "empty=" in mon.reason
+    assert loco.tick() == "locked"
+    assert loco.enabled is False
 
 
 def test_sample_distance_uses_the_median_of_valid_reads(rig):
@@ -352,6 +375,23 @@ def test_stalled_leg_buffer_still_times_out(make_hw, monkeypatch, capsys):
     assert hw.dog.legs_stop_calls >= 1
     assert brain.memory()["stats"]["floor_moves"] == before
     assert "walk timeout -> legs_stop" in capsys.readouterr().out
+
+
+def test_patrol_start_logs_the_effective_stop(make_hw, capsys):
+    """Speed 95 is a fast gait, so the logged stop is 35 cm, not the 25 cm base."""
+    from safety import describe_stop
+    hw = make_hw()
+    loco = Locomotion(hw, SafetyMonitor(hw))
+    assert loco.enable("test")
+    text = capsys.readouterr().out
+    assert "patrol_enabled" in text
+    assert "effective_stop_cm=35" in text
+    assert "base_cm=25" in text
+    assert "source=default" in text
+    assert "speed=95" in text
+    assert describe_stop(95) in text
+    assert describe_stop(80).endswith("effective_stop_cm=25")
+    assert describe_stop(98).endswith("effective_stop_cm=35")
 
 
 def test_patrol_refused_without_imu_unless_allowed(make_hw):

@@ -4,7 +4,8 @@ Every move: safety.allow_move() -> plan from a fresh distance read -> up to
 WALK_MAX_STEPS at WALK_SPEED with safety.walking set (so the 10 Hz monitor
 enforces stop-distance, empty reads and head touch) -> poll until the legs
 finish or the monitor trips. The monitor sees the speed of this move so a
-fast walk uses the longer stop distance.
+fast walk uses the longer stop distance. A quiet ranger pauses that step
+and holds; it locks patrol only if the silence outlasts the hold.
 """
 from __future__ import annotations
 import time
@@ -12,7 +13,8 @@ import config as C
 from config import log
 import abort
 import brain
-from safety import stop_cm_for_speed
+from hardware import POSTURE_ACTIONS
+from safety import describe_stop, stop_cm_for_speed
 
 # Before a step, take several echoes. Gait vibration and a nose-down head
 # return None for a sample or two; one miss must not cancel the walk.
@@ -119,7 +121,10 @@ class Locomotion:
         self.enabled = True
         self.session_start = time.time()
         self.rest_until = 0.0
-        log(f"patrol_enabled why={why} speed={C.WALK_SPEED} max_steps={C.WALK_MAX_STEPS} cap={C.PATROL_MAX_SECONDS}s imu_ok={self.hw.imu_ok}")
+        log(
+            f"patrol_enabled why={why} speed={C.WALK_SPEED} max_steps={C.WALK_MAX_STEPS} "
+            f"cap={C.PATROL_MAX_SECONDS}s imu_ok={self.hw.imu_ok} {describe_stop(C.WALK_SPEED)}"
+        )
         return True
 
     def disable(self, why: str) -> None:
@@ -147,11 +152,41 @@ class Locomotion:
             self.rest_until = time.time() + C.PATROL_REST_SECONDS
             self.session_start = self.rest_until  # next session starts after rest
             return "rest"
+        if self.safety.distance_hold:
+            outcome = self.poll_distance_hold()
+            if outcome != "clear":
+                return outcome
         move, steps = self.plan()
         if move == "halt":
             return "halt"
+        if move == "hold":
+            return "hold"
         ok = self._do(move, steps, C.WALK_SPEED, walking=True)
+        if not self.safety.allow_move():
+            return "aborted"
+        if self.safety.distance_hold:
+            return "hold"
         return move if ok else "aborted"
+
+    def poll_distance_hold(self) -> str:
+        """One check while the ranger is quiet.
+
+        ``clear`` means an echo came back and the next plan may walk.
+        ``hold`` means keep standing. ``halt`` means the silence outlasted
+        the window and patrol is locked. Ctrl+C returns ``aborted``.
+        """
+        if abort.requested():
+            return "aborted"
+        if not self.safety.allow_move():
+            return "locked"
+        reading, _empty = sample_distance(self.hw, samples=1, gap=0)
+        if reading is not None:
+            self.safety.end_distance_hold(reading)
+            return "clear"
+        if self.safety.distance_hold_expired():
+            self.safety.trip(f"distance_empty empty={self.safety._empty}")
+            return "halt"
+        return "hold"
 
     def plan(self) -> tuple[str, int]:
         # Level the ultrasonic before trusting a range. The shelf pitch aims
@@ -160,9 +195,10 @@ class Locomotion:
         self.hw.level_head(0, 0, speed=40)
         c, empty = sample_distance(self.hw)
         if c is None:
-            log(f"plan halt: no distance reading empty={empty}")
-            self.safety.trip(f"distance_empty_before_move empty={empty}")
-            return "halt", 0
+            # Don't step without an echo, and don't lock on the first quiet
+            # sample. The hold stands still and resumes when a reading returns.
+            self.safety.begin_distance_hold(empty, where="before_move")
+            return "hold", 0
         if c >= C.OBSTACLE_CLEAR_CM:
             return "forward", C.WALK_MAX_STEPS
         stop = stop_cm_for_speed(C.WALK_SPEED)
@@ -206,12 +242,21 @@ class Locomotion:
             # Hold the ranger level for the step. Follow calls _do directly
             # and never goes through plan().
             self.hw.level_head(0, 0, speed=40)
-        if walking and action != "backward":
-            # Speed first, then the flag, so a 10 Hz tick never sees a walk
-            # with the previous move's speed.
-            self.safety.walk_speed = int(speed)
-            self.safety.walking.set()   # monitor enforces stop distance (not while backing away)
+        started_pose = False
+        settled = False
         try:
+            # Pose before the walking flag, so a tick during stand-up out of
+            # sit does not treat the sit attitude as a fall.
+            if action in POSTURE_ACTIONS:
+                self.hw.begin_posture(action)
+                started_pose = True
+            elif action in _WALK_ACTIONS:
+                self.hw.begin_gait()
+            if walking and action != "backward":
+                # Speed first, then the flag, so a 10 Hz tick never sees a walk
+                # with the previous move's speed.
+                self.safety.walk_speed = int(speed)
+                self.safety.walking.set()   # monitor enforces stop distance (not while backing away)
             before = _buffer_len(dog)
             dog.do_action(action, step_count=steps, speed=speed)
             # Real pidog and the realistic sim: the buffer is what's left to
@@ -234,6 +279,12 @@ class Locomotion:
                     log("walk interrupted by shutdown" if abort.requested() else "walk interrupted by safety")
                     self.hw.legs_stop()
                     return False
+                if walking and self.safety.distance_hold:
+                    # The monitor already stopped the legs. Don't take another
+                    # step until an echo comes back.
+                    log("walk paused distance_hold")
+                    self.hw.legs_stop()
+                    return False
                 now = time.time()
                 n = _buffer_len(dog)
                 if n < last_len:
@@ -252,7 +303,11 @@ class Locomotion:
                 log("walk interrupted by shutdown" if abort.requested() else "walk interrupted by safety")
                 self.hw.legs_stop()
                 return False
+            if walking and self.safety.distance_hold:
+                log("walk paused distance_hold")
+                return False
             brain.bump("floor_moves")
+            settled = True
             return True
         except Exception as exc:
             log(f"walk_error={exc}")
@@ -261,6 +316,11 @@ class Locomotion:
         finally:
             self.safety.walking.clear()
             self.safety.walk_speed = None
+            if started_pose:
+                if settled:
+                    self.hw.end_posture(action)
+                else:
+                    self.hw.cancel_posture()
 
 
 def _buffer_len(dog) -> int:

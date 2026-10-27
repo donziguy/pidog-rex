@@ -93,6 +93,12 @@ class Follow:
             self.session.loco._do("sit", 1, 40, walking=False)
             self.stop("cap")
             return "cap"
+        if self.session.safety.distance_hold:
+            outcome = self.session.loco.poll_distance_hold()
+            if outcome != "clear":
+                if outcome in ("halt", "locked", "aborted"):
+                    self.stop(outcome)
+                return outcome
         target = choose_target(hits if hits is not None else self.session.face_hits)
         if target is None:
             self.misses += 1
@@ -103,6 +109,11 @@ class Follow:
         self.misses = 0
         action = action_for_bbox(target.bbox)
         ok = self.session.loco._do(action, 1, C.FOLLOW_SPEED, walking=True)
+        if self.session.safety.distance_hold and self.session.safety.allow_move():
+            # The step was cut short because the ranger went quiet. Stay in
+            # follow and wait; do not take another blind step. A real safety
+            # lock still falls through to the aborted return below.
+            return "hold"
         if not ok:
             self.stop("aborted")
             return "aborted"
