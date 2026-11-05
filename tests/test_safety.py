@@ -22,6 +22,12 @@ def test_documented_safety_defaults():
     assert C.SAFETY_BATTERY_LOW_V == 6.6
     assert C.SAFETY_EMPTY_READS == 3
     assert C.SAFETY_EMPTY_SECONDS == pytest.approx(1.0)
+    assert C.SAFETY_DISTANCE_HOLD_SECONDS == pytest.approx(5.0)
+    assert C.SAFETY_DISTANCE_HOLD_SECONDS >= C.SAFETY_EMPTY_SECONDS
+    assert C.SAFETY_STOP_SOURCE == "default"
+    assert C.SAFETY_STOP_IGNORED is None
+    assert C.SAFETY_POSTURE_TILT_DEG == max(50.0, C.SAFETY_TILT_DEG + 20.0)
+    assert C.SAFETY_RECOVER_CLEAR_DEG == pytest.approx(20.0)
     assert C.SAFETY_POLL == pytest.approx(0.1)
 
 
@@ -87,6 +93,77 @@ def test_fast_walk_stops_farther_and_tilt_still_trips(make_hw):
     assert "tilt" in mon.reason
 
 
+def test_legacy_base_does_not_shrink_the_fast_gait(monkeypatch):
+    """PIDOG_OBSTACLE_STOP_CM is only the base. Speed 95 and 98 keep the fast stop."""
+    from safety import describe_stop, stop_cm_for_speed
+    monkeypatch.setattr(C, "SAFETY_STOP_CM", 28.0)
+    monkeypatch.setattr(C, "SAFETY_STOP_SOURCE", "PIDOG_OBSTACLE_STOP_CM")
+    monkeypatch.setattr(C, "SAFETY_STOP_IGNORED", None)
+    monkeypatch.setattr(C, "SAFETY_FAST_STOP_CM", 35.0)
+    assert stop_cm_for_speed(80) == 28
+    assert stop_cm_for_speed(95) == 35
+    assert stop_cm_for_speed(98) == 35
+    text = describe_stop(95)
+    assert "source=PIDOG_OBSTACLE_STOP_CM" in text
+    assert "base_cm=28" in text
+    assert "effective_stop_cm=35" in text
+    monkeypatch.setattr(C, "SAFETY_STOP_CM", 25.0)
+    monkeypatch.setattr(C, "SAFETY_STOP_SOURCE", "PIDOG_REX_STOP_CM")
+    monkeypatch.setattr(C, "SAFETY_STOP_IGNORED", 28.0)
+    text = describe_stop(95)
+    assert "source=PIDOG_REX_STOP_CM" in text
+    assert "ignored_legacy_cm=28" in text
+    assert text.endswith("effective_stop_cm=35")
+
+
+def test_obstacle_stop_env_precedence(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    proc = run_py(
+        f"""
+        import os, importlib
+        os.environ["HOME"] = {str(home)!r}
+        for key in ("PIDOG_REX_STOP_CM", "PIDOG_OBSTACLE_STOP_CM", "PIDOG_REX_FAST_STOP_CM"):
+            os.environ.pop(key, None)
+        import config, safety
+        importlib.reload(config)
+        assert config.SAFETY_STOP_CM == 25, config.SAFETY_STOP_CM
+        assert config.SAFETY_STOP_SOURCE == "default"
+        assert safety.stop_cm_for_speed(95) == 35
+        assert safety.stop_cm_for_speed(98) == 35
+        assert safety.stop_cm_for_speed(80) == 25
+        os.environ["PIDOG_OBSTACLE_STOP_CM"] = "28"
+        importlib.reload(config)
+        assert config.SAFETY_STOP_CM == 28
+        assert config.SAFETY_STOP_SOURCE == "PIDOG_OBSTACLE_STOP_CM"
+        assert config.SAFETY_STOP_IGNORED is None
+        assert safety.stop_cm_for_speed(80) == 28
+        assert safety.stop_cm_for_speed(95) == 35
+        assert safety.stop_cm_for_speed(98) == 35
+        os.environ["PIDOG_REX_STOP_CM"] = "25"
+        importlib.reload(config)
+        assert config.SAFETY_STOP_CM == 25
+        assert config.SAFETY_STOP_SOURCE == "PIDOG_REX_STOP_CM"
+        assert config.SAFETY_STOP_IGNORED == 28
+        assert safety.stop_cm_for_speed(95) == 35
+        os.environ["PIDOG_REX_FAST_STOP_CM"] = "32"
+        importlib.reload(config)
+        assert safety.stop_cm_for_speed(98) == 32
+        os.environ["PIDOG_REX_STOP_CM"] = "40"
+        os.environ["PIDOG_REX_FAST_STOP_CM"] = "35"
+        importlib.reload(config)
+        assert safety.stop_cm_for_speed(95) == 40
+        os.environ["PIDOG_REX_STOP_CM"] = "nope"
+        importlib.reload(config)
+        assert config.SAFETY_STOP_SOURCE == "PIDOG_OBSTACLE_STOP_CM"
+        assert config.SAFETY_STOP_CM == 28
+        print("stop-precedence-ok")
+        """,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "stop-precedence-ok" in proc.stdout
+
+
 def test_fast_stop_cannot_be_closer_than_the_base(monkeypatch):
     from safety import stop_cm_for_speed
     monkeypatch.setattr(C, "SAFETY_FAST_STOP_CM", 10)
@@ -105,8 +182,11 @@ def test_obstacle_while_idle_does_not_trip(make_hw):
     assert hw.dog.legs_stop_calls == 0
 
 
-def test_empty_distance_needs_about_a_second_while_walking(make_hw, monkeypatch):
-    """A burst of None at the same instant does not trip. A full second of them does."""
+def test_empty_distance_pauses_then_locks_if_it_stays_gone(make_hw, monkeypatch):
+    """A burst of None does not pause. About 1 s stops the legs without locking.
+
+    The lock waits out the hold (default 5 s). An echo in that window resumes.
+    """
     clock = sim.ManualClock(100.0)
     monkeypatch.setattr("safety.time.time", clock.time)
     hw = make_hw()
@@ -116,11 +196,23 @@ def test_empty_distance_needs_about_a_second_while_walking(make_hw, monkeypatch)
     for _ in range(8):
         mon._tick()
     assert not mon.locked.is_set()
+    assert not mon.distance_hold
     assert mon._empty == 8
     clock.advance(0.9)
     mon._tick()
     assert not mon.locked.is_set()
-    clock.advance(0.1)
+    assert not mon.distance_hold
+    clock.advance(0.1)  # elapsed == 1 s: pause, still not a lock
+    mon._tick()
+    assert mon.distance_hold is True
+    assert not mon.locked.is_set()
+    assert not mon.walking.is_set()
+    assert hw.dog.legs_stop_calls >= 1
+    assert hw.dog.lie_calls == 0
+    clock.advance(3.9)
+    mon._tick()
+    assert not mon.locked.is_set()
+    clock.advance(0.1)  # elapsed == 5 s
     mon._tick()
     assert_halted(mon, hw.dog)
     assert mon.reason.startswith("distance_empty")
@@ -135,7 +227,34 @@ def test_empty_distance_needs_about_a_second_while_walking(make_hw, monkeypatch)
     mon._tick()
     assert mon._empty == 0
     assert mon._empty_since is None
+    assert not mon.distance_hold
     assert not mon.locked.is_set()
+
+
+def test_distance_hold_clears_when_the_echo_returns(make_hw, monkeypatch):
+    clock = sim.ManualClock(0.0)
+    monkeypatch.setattr("safety.time.time", clock.time)
+    hw = make_hw()
+    mon = _monitor(hw)
+    mon.walking.set()
+    hw.dog.distance.set(None)
+    mon._tick()
+    clock.advance(1.0)
+    mon._tick()
+    assert mon.distance_hold is True and not mon.locked.is_set()
+    hw.dog.distance.set(80)
+    mon._tick()
+    assert mon.distance_hold is False
+    assert mon._empty == 0
+    assert not mon.locked.is_set()
+    assert hw.dog.lie_calls == 0
+    # back on a step, a real obstacle still stops immediately
+    mon.walking.set()
+    mon.walk_speed = 95
+    hw.dog.distance.set(30)
+    mon._tick()
+    assert_halted(mon, hw.dog)
+    assert mon.reason == "obstacle 30cm"
 
 
 def test_obstacle_is_instant_during_an_empty_window(make_hw, monkeypatch):
@@ -154,15 +273,26 @@ def test_obstacle_is_instant_during_an_empty_window(make_hw, monkeypatch):
 
 
 def test_empty_window_follows_the_configured_seconds(make_hw, monkeypatch):
+    """The pause tracks EMPTY seconds. The lock tracks the hold, not the pause."""
     clock = sim.ManualClock(0.0)
     monkeypatch.setattr("safety.time.time", clock.time)
     monkeypatch.setattr(C, "SAFETY_EMPTY_SECONDS", 0.4)
+    monkeypatch.setattr(C, "SAFETY_DISTANCE_HOLD_SECONDS", 1.2)
     hw = make_hw()
     mon = _monitor(hw)
     mon.walking.set()
     hw.dog.distance.set(None)
     mon._tick()
     clock.advance(0.39)
+    mon._tick()
+    assert not mon.distance_hold
+    assert not mon.locked.is_set()
+    clock.advance(0.01)
+    mon._tick()
+    assert mon.distance_hold is True
+    assert not mon.locked.is_set()
+    assert hw.dog.lie_calls == 0
+    clock.advance(0.79)
     mon._tick()
     assert not mon.locked.is_set()
     clock.advance(0.01)
@@ -195,6 +325,13 @@ def test_empty_seconds_env(tmp_path):
         os.environ["PIDOG_REX_EMPTY_SECONDS"] = "nope"
         importlib.reload(config)
         assert config.SAFETY_EMPTY_SECONDS == 1.0
+        os.environ["PIDOG_REX_EMPTY_SECONDS"] = "1"
+        os.environ["PIDOG_REX_DISTANCE_HOLD_SECONDS"] = "8"
+        importlib.reload(config)
+        assert config.SAFETY_DISTANCE_HOLD_SECONDS == 8
+        os.environ["PIDOG_REX_DISTANCE_HOLD_SECONDS"] = "0.1"
+        importlib.reload(config)
+        assert config.SAFETY_DISTANCE_HOLD_SECONDS == config.SAFETY_EMPTY_SECONDS
         print("empty-seconds-ok")
         """,
     )
@@ -280,6 +417,26 @@ def test_low_battery_held_for_three_samples(make_hw, monkeypatch):
 
 
 def test_bogus_battery_readings_are_ignored(make_hw, monkeypatch):
+    """0.0 V and other impossible reads are not the pack voltage.
+
+    They do not trip the low-battery stop, they do not replace the last good
+    reading, and they do not wipe a low streak that is already building.
+    Three plausible samples under 6.6 V still trip.
+    """
+    from safety import BatteryFilter
+
+    filt = BatteryFilter()
+    assert filt.push(8.0) is True and filt.value == pytest.approx(8.0)
+    assert filt.push(8.0) is True
+    assert filt.push(0.0) is False and filt.value == pytest.approx(8.0)
+    assert filt.push(None) is False
+    assert filt.push(float("nan")) is False
+    assert filt.push(15.0) is False and filt.latest == pytest.approx(8.0)
+    # one plausible dip does not become the reported median
+    assert filt.push(5.5) is True
+    assert filt.latest == pytest.approx(5.5)
+    assert filt.value == pytest.approx(8.0)
+
     clock = sim.ManualClock(800.0)
     sim.configure(clock=clock)
     hw = make_hw()
@@ -291,6 +448,15 @@ def test_bogus_battery_readings_are_ignored(make_hw, monkeypatch):
             clock.advance(1.0)
             mon._tick()
 
+    hw.dog.battery.set(0.0)  # nothing plausible yet: do not publish 0.0
+    samples(1)
+    assert mon.last["battery"] is None
+    assert mon._low_batt == 0
+
+    hw.dog.battery.set(8.0)
+    samples(1)
+    assert mon.last["battery"] == pytest.approx(8.0)
+
     hw.dog.battery.set(6.6)  # not below the limit
     samples(3)
     assert mon._low_batt == 0
@@ -298,23 +464,21 @@ def test_bogus_battery_readings_are_ignored(make_hw, monkeypatch):
     hw.dog.battery.set(6.2)
     samples(2)
     assert mon._low_batt == 2
-    hw.dog.battery.set(2.5)  # under 3 V: glitch, not a dying pack
-    samples(1)
-    assert mon._low_batt == 0
-
-    hw.dog.battery.set(6.2)
-    samples(2)
-    hw.dog.battery.set(3.0)  # the code treats 3.0 V as bogus too (strictly greater than 3)
-    samples(1)
-    assert mon._low_batt == 0
-
-    hw.dog.battery.set(6.2)
-    samples(2)
-    hw.dog.battery.set(None)  # sensor failed open
-    samples(1)
-    assert mon._low_batt == 0
     assert not mon.locked.is_set()
-    assert hw.dog.lie_calls == 0
+    for glitch in (0.0, 2.5, 3.0, None, 12.0):
+        hw.dog.battery.set(glitch)
+        samples(1)
+        assert mon._low_batt == 2
+        assert mon.last["battery"] != glitch
+        assert mon.last["battery"] == pytest.approx(6.2)
+        assert not mon.locked.is_set()
+
+    hw.dog.battery.set(6.2)  # third plausible low, with glitches in between
+    samples(1)
+    assert_halted(mon, hw.dog)
+    assert mon.reason.startswith("battery_low")
+    assert "6.2" in mon.reason
+    assert mon.last["battery"] == pytest.approx(6.2)
 
 
 def test_head_touch_while_walking(make_hw):
@@ -372,6 +536,45 @@ def test_trip_locks_movement_until_reset(make_hw, monkeypatch):
     assert loco.enable("rex patrol") is True  # reset is how patrol starts again
     assert mon.allow_move()
     assert loco.tick() == "forward"
+
+
+def test_dropout_mid_step_pauses_without_locking_patrol(make_hw, monkeypatch):
+    clock = sim.ManualClock(20.0)
+    monkeypatch.setattr("safety.time.time", clock.time)
+    hw = make_hw()
+    hw.dog.pause_legs()
+    hw.dog.distance.set(100)
+    mon = _monitor(hw)
+    loco = Locomotion(hw, mon)
+    mon.on_trip = lambda reason: loco.disable(f"trip:{reason}")
+    assert loco.enable("test")
+    before = brain.memory()["stats"]["floor_moves"]
+    result = {}
+
+    def go():
+        result["value"] = loco.tick()
+
+    thread = threading.Thread(target=go, daemon=True)
+    thread.start()
+    assert hw.dog.action_started.wait(2)
+    assert mon.walking.is_set()
+    hw.dog.distance.set(None)
+    mon._tick()
+    clock.advance(1.0)
+    mon._tick()
+    thread.join(2)
+    assert not thread.is_alive()
+    assert result["value"] == "hold"
+    assert mon.distance_hold is True
+    assert not mon.locked.is_set()
+    assert loco.enabled is True
+    assert brain.memory()["stats"]["floor_moves"] == before
+    assert hw.dog.lie_calls == 0
+    hw.dog.release_legs()
+    hw.dog.distance.set(100)
+    assert loco.tick() == "forward"
+    assert mon.distance_hold is False
+    assert not mon.locked.is_set()
 
 
 def test_distance_drop_mid_walk_aborts_the_step(make_hw):

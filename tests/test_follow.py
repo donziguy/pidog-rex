@@ -109,6 +109,33 @@ def test_lost_person_and_caps_stop_the_session(make_hw, monkeypatch):
     assert follower.active is False
 
 
+def test_follow_holds_a_distance_dropout_and_can_resume(make_hw, monkeypatch):
+    monkeypatch.setattr("locomotion.time.sleep", lambda *_a, **_k: None)
+    clock = sim.ManualClock(0.0)
+    monkeypatch.setattr("safety.time.time", clock.time)
+    hw = make_hw()
+    session = _session(hw)
+    follower = follow_mod.Follow(session)
+    assert follower.start()
+    hit = _hit("Cory", (0.45, 0.2, 0.1, 0.4))
+    assert follower.tick([hit]) == "forward"
+    hw.dog.distance.set(None)
+    session.safety.begin_distance_hold(3, where="test")
+    assert follower.tick([hit]) == "hold"
+    assert follower.active is True
+    assert [a["action"] for a in hw.dog.action_log] == ["forward"]
+    hw.dog.distance.set(90)
+    assert follower.tick([hit]) == "forward"
+    assert follower.active is True
+    hw.dog.distance.set(None)
+    session.safety.begin_distance_hold(4, where="test")
+    clock.advance(C.SAFETY_DISTANCE_HOLD_SECONDS)
+    assert follower.tick([hit]) == "halt"
+    assert follower.active is False
+    assert session.safety.locked.is_set()
+    assert session.safety.reason.startswith("distance_empty")
+
+
 def test_guard_and_dead_imu_refuse_follow(make_hw, monkeypatch, capsys):
     import guard
     monkeypatch.setattr(C, "GUARD_ENABLED", True)
